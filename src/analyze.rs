@@ -1,7 +1,10 @@
 use anyhow::Result;
 use regex::Regex;
 
-use crate::model::{ExtendedStatsSummary, LetterRow, NormalizedEntropySummary, Normalization, Summary};
+use crate::model::{
+    ExtendedStatsSummary, LetterRow, Normalization, NormalizedEntropySummary, Summary,
+};
+use crate::services::errors::AnalysisError;
 use crate::stats::{calculate_extended_stats, calculate_normalized_entropy};
 
 pub fn analyze_text(text: &str, norm: &Normalization) -> Result<Summary> {
@@ -13,14 +16,28 @@ pub fn analyze_text(text: &str, norm: &Normalization) -> Result<Summary> {
 
     for m in word_re.find_iter(text) {
         let token = m.as_str();
-        if token.chars().count() < norm.min_token_len { continue; }
-        let mut ch = token.chars().next().unwrap().to_lowercase().next().unwrap();
+        if token.chars().count() < norm.min_token_len {
+            continue;
+        }
+
+        // Safe token processing
+        let mut ch = token
+            .chars()
+            .next()
+            .and_then(|c| c.to_lowercase().next())
+            .ok_or_else(|| AnalysisError::token_processing(token, 0))?;
 
         // Normalization for rus28-like behavior
         if norm.alphabet.len() == 28 {
-            if ch == 'ё' && !norm.rus28_keep_yo { ch = 'е'; }
-            if ch == 'й' && !norm.rus28_keep_j { ch = 'и'; }
-            if ch == 'ъ' || ch == 'ь' { continue; }
+            if ch == 'ё' && !norm.rus28_keep_yo {
+                ch = 'е';
+            }
+            if ch == 'й' && !norm.rus28_keep_j {
+                ch = 'и';
+            }
+            if ch == 'ъ' || ch == 'ь' {
+                continue;
+            }
         }
 
         if let Some(idx) = letters.iter().position(|&c| c == ch) {
@@ -42,9 +59,17 @@ pub fn analyze_text(text: &str, norm: &Normalization) -> Result<Summary> {
         for (i, (letter, &cnt)) in letters.iter().zip(counts.iter()).enumerate() {
             let p = cnt as f64 / n_f;
             let p_log2 = if p > 0.0 { p * p.log2() } else { 0.0 };
-            if p > 0.0 { non_zero += 1; }
+            if p > 0.0 {
+                non_zero += 1;
+            }
             h_acc += p_log2;
-            rows.push(LetterRow { rank: i + 1, letter: *letter, count: cnt, p, p_log2 });
+            rows.push(LetterRow {
+                rank: i + 1,
+                letter: *letter,
+                count: cnt,
+                p,
+                p_log2,
+            });
         }
         let h = -h_acc;
         h_bits = Some(h);
@@ -63,16 +88,22 @@ pub fn analyze_text(text: &str, norm: &Normalization) -> Result<Summary> {
         sigma = Some(var.sqrt());
     } else {
         for (i, letter) in letters.iter().enumerate() {
-            rows.push(LetterRow { rank: i + 1, letter: *letter, count: 0, p: 0.0, p_log2: 0.0 });
+            rows.push(LetterRow {
+                rank: i + 1,
+                letter: *letter,
+                count: 0,
+                p: 0.0,
+                p_log2: 0.0,
+            });
         }
     }
 
-    Ok(Summary { 
-        n_words, 
-        h_bits, 
-        x_mean, 
-        sigma, 
-        non_zero_letters: non_zero, 
+    Ok(Summary {
+        n_words,
+        h_bits,
+        x_mean,
+        sigma,
+        non_zero_letters: non_zero,
         rows,
         extended_stats: None,
         normalized_entropy: None,
@@ -91,19 +122,18 @@ pub fn add_normalized_entropy(summary: &mut Summary) {
 }
 
 /// Calculate extended statistics for a batch of summaries
-pub fn calculate_batch_extended_stats(summaries: &[(String, Summary)]) -> Option<ExtendedStatsSummary> {
+pub fn calculate_batch_extended_stats(
+    summaries: &[(String, Summary)],
+) -> Option<ExtendedStatsSummary> {
     // Collect all entropy values
-    let entropy_values: Vec<f64> = summaries
-        .iter()
-        .filter_map(|(_, s)| s.h_bits)
-        .collect();
-    
+    let entropy_values: Vec<f64> = summaries.iter().filter_map(|(_, s)| s.h_bits).collect();
+
     if entropy_values.len() < 2 {
         return None;
     }
-    
+
     let stats = calculate_extended_stats(&entropy_values)?;
-    
+
     Some(ExtendedStatsSummary {
         median: Some(stats.median),
         q1: Some(stats.q1),
@@ -116,5 +146,3 @@ pub fn calculate_batch_extended_stats(summaries: &[(String, Summary)]) -> Option
         kurtosis: Some(stats.kurtosis),
     })
 }
-
-

@@ -196,6 +196,10 @@ pub struct MultiPoemArgs {
     #[arg(long)]
     pub normal_dist_plot: Option<std::path::PathBuf>,
 
+    /// Generate correlation plot comparing different translation systems
+    #[arg(long)]
+    pub correlation_lang: Option<std::path::PathBuf>,
+
     /// Minimum entropy (H) threshold for filtering points on plots
     #[arg(long)]
     pub min_entropy: Option<f64>,
