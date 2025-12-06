@@ -7,6 +7,9 @@ import streamlit as st
 
 from entropy_analysis.visualization.charts import (
     create_letter_distribution_chart,
+    create_ngram_distribution_chart,
+    create_ngram_stats_summary,
+    create_ngram_zipf_chart,
     create_zipf_plot,
 )
 
@@ -88,8 +91,8 @@ def render_advanced_metrics(result, key_suffix: str = ""):
         st.subheader("🔬 Улучшенные метрики")
 
         # Tabs for better organization
-        enh_tab1, enh_tab2, enh_tab3, enh_tab4 = st.tabs(
-            ["📈 Интерпретация", "🎯 Распределение", "🔢 Rényi Спектр", "📚 Лексика и Структура"]
+        enh_tab1, enh_tab2, enh_tab3, enh_tab4, enh_tab5 = st.tabs(
+            ["📈 Интерпретация", "🎯 Распределение", "🔢 Rényi Спектр", "📚 Лексика и Структура", "🔤 N-граммы букв"]
         )
 
         with enh_tab1:
@@ -259,11 +262,11 @@ def render_advanced_metrics(result, key_suffix: str = ""):
                         f"{result.mattr:.4f}",
                         help="Moving Average Type-Token Ratio. Стабильная метрика лексического разнообразия.",
                     )
-                elif result.bigram_entropy:
+                if result.bigram_entropy:
                     st.metric(
-                        "H(X₂|X₁)",
+                        "H биграмм слов",
                         f"{result.bigram_entropy:.3f}",
-                        help="Условная энтропия биграмм. Насколько сложно предсказать следующую букву/слово.",
+                        help="Энтропия биграмм слов. Предсказуемость следующего слова по предыдущему.",
                     )
 
             with col2:
@@ -279,11 +282,11 @@ def render_advanced_metrics(result, key_suffix: str = ""):
                         f"{result.gries_dp:.4f}",
                         help="Deviation of Proportions. 1.0 = идеальная равномерность слов.",
                     )
-                elif result.trigram_entropy:
+                if result.trigram_entropy:
                     st.metric(
-                        "H(X₃|X₁,X₂)",
+                        "H триграмм слов",
                         f"{result.trigram_entropy:.3f}",
-                        help="Условная энтропия триграмм. Предсказуемость по двум предыдущим.",
+                        help="Энтропия триграмм слов. Предсказуемость слова по двум предыдущим.",
                     )
 
             with col3:
@@ -299,6 +302,34 @@ def render_advanced_metrics(result, key_suffix: str = ""):
                         f"{result.pierrehumbert_beta:.3f}",
                         help="Параметр формы Weibull. <1: взрывные слова (content), ~1: случайные, >1: регулярные (function).",
                     )
+            
+            # Letter-level N-gram Entropies Section
+            if result.letter_bigram_entropy is not None or result.letter_trigram_entropy is not None:
+                st.divider()
+                st.markdown("**🔤 Энтропия N-грамм букв (глубокий анализ)**")
+                st.caption("Анализ последовательностей букв — ключевая метрика для различения авторских стилей")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if result.letter_bigram_entropy is not None:
+                        st.metric(
+                            "H₂ биграмм букв",
+                            f"{result.letter_bigram_entropy:.4f} бит",
+                            help="Энтропия последовательностей из 2 букв подряд. "
+                                 "Показывает, насколько предсказуемы сочетания букв в тексте.",
+                        )
+                        st.caption("Пары букв: 'пр', 'ри', 'ив', 'ве', 'ет'...")
+                
+                with col2:
+                    if result.letter_trigram_entropy is not None:
+                        st.metric(
+                            "H₃ триграмм букв",
+                            f"{result.letter_trigram_entropy:.4f} бит",
+                            help="Энтропия последовательностей из 3 букв подряд. "
+                                 "Показывает контекстные зависимости и стилистические паттерны автора.",
+                        )
+                        st.caption("Тройки букв: 'при', 'рив', 'иве', 'вет'...")
             
             # Readability Indices Section
             if result.flesch_reading_ease is not None or result.gunning_fog_index is not None:
@@ -414,6 +445,196 @@ def render_advanced_metrics(result, key_suffix: str = ""):
                         f"{result.zipf_mandelbrot_beta:.3f}",
                         help="Параметр коррекции кривизны Мандельброта. Улучшает аппроксимацию для частых слов.",
                     )
+
+        with enh_tab5:
+            st.markdown("**Анализ распределений N-грамм букв**")
+            st.caption("Глубокий анализ последовательностей букв — ключевая метрика для стилометрии")
+            
+            # Check if we have n-gram distributions
+            has_bigram_dist = result.letter_bigram_distribution is not None
+            has_trigram_dist = result.letter_trigram_distribution is not None
+            
+            if not has_bigram_dist and not has_trigram_dist:
+                st.info("N-грамм распределения недоступны для этого текста. Возможно, текст слишком короткий.")
+            else:
+                # Bigram analysis
+                if has_bigram_dist:
+                    st.markdown("### Биграммы букв (пары)")
+                    
+                    bigram_dist = result.letter_bigram_distribution
+                    
+                    # Key metrics row
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric(
+                            "Всего биграмм",
+                            f"{bigram_dist.total_ngrams:,}",
+                            help="Общее количество пар букв в тексте",
+                        )
+                    with col2:
+                        st.metric(
+                            "Уникальных",
+                            f"{bigram_dist.unique_ngrams:,}",
+                            help="Количество различных пар букв",
+                        )
+                    with col3:
+                        st.metric(
+                            "Энтропия H₂",
+                            f"{bigram_dist.entropy:.3f} бит",
+                            help="Энтропия распределения биграмм",
+                        )
+                    with col4:
+                        st.metric(
+                            "Условная H(X₂|X₁)",
+                            f"{bigram_dist.conditional_entropy:.3f} бит",
+                            help="Насколько предсказуема следующая буква по предыдущей",
+                        )
+                    
+                    # Additional metrics row
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric(
+                            "Покрытие топ-10",
+                            f"{bigram_dist.coverage_top_10 * 100:.1f}%",
+                            help="Какую долю текста покрывают 10 самых частых биграмм",
+                        )
+                    with col2:
+                        st.metric(
+                            "Hapax Legomena",
+                            f"{bigram_dist.hapax_legomena:,} ({bigram_dist.hapax_ratio * 100:.1f}%)",
+                            help="Биграммы, встречающиеся только один раз",
+                        )
+                    with col3:
+                        st.metric(
+                            "Zipf α (биграммы)",
+                            f"{bigram_dist.zipf_alpha:.2f} (R²={bigram_dist.zipf_r_squared:.3f})",
+                            help="Показатель степени закона Ципфа для биграмм",
+                        )
+                    
+                    # Visualizations
+                    viz_col1, viz_col2 = st.columns(2)
+                    
+                    with viz_col1:
+                        fig_bigram = create_ngram_distribution_chart(bigram_dist, top_k=15)
+                        st.plotly_chart(fig_bigram, use_container_width=True, key=f"bigram_dist_{key_suffix}_{id(result)}")
+                    
+                    with viz_col2:
+                        fig_bigram_zipf = create_ngram_zipf_chart(bigram_dist)
+                        st.plotly_chart(fig_bigram_zipf, use_container_width=True, key=f"bigram_zipf_{key_suffix}_{id(result)}")
+                    
+                    # Top bigrams table
+                    with st.expander("📋 Топ-20 биграмм букв", expanded=False):
+                        import polars as pl
+                        
+                        top_bigrams_data = {
+                            "Ранг": [ng.rank for ng in bigram_dist.top_ngrams[:20]],
+                            "Биграмма": [ng.ngram for ng in bigram_dist.top_ngrams[:20]],
+                            "Количество": [ng.count for ng in bigram_dist.top_ngrams[:20]],
+                            "Частота (%)": [f"{ng.frequency * 100:.2f}" for ng in bigram_dist.top_ngrams[:20]],
+                        }
+                        df_bigrams = pl.DataFrame(top_bigrams_data)
+                        st.dataframe(df_bigrams, use_container_width=True, hide_index=True)
+                
+                st.divider()
+                
+                # Trigram analysis
+                if has_trigram_dist:
+                    st.markdown("### Триграммы букв (тройки)")
+                    
+                    trigram_dist = result.letter_trigram_distribution
+                    
+                    # Key metrics row
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric(
+                            "Всего триграмм",
+                            f"{trigram_dist.total_ngrams:,}",
+                            help="Общее количество троек букв в тексте",
+                        )
+                    with col2:
+                        st.metric(
+                            "Уникальных",
+                            f"{trigram_dist.unique_ngrams:,}",
+                            help="Количество различных троек букв",
+                        )
+                    with col3:
+                        st.metric(
+                            "Энтропия H₃",
+                            f"{trigram_dist.entropy:.3f} бит",
+                            help="Энтропия распределения триграмм",
+                        )
+                    with col4:
+                        st.metric(
+                            "Условная H(X₃|X₁X₂)",
+                            f"{trigram_dist.conditional_entropy:.3f} бит",
+                            help="Насколько предсказуема третья буква по двум предыдущим",
+                        )
+                    
+                    # Additional metrics row
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric(
+                            "Покрытие топ-10",
+                            f"{trigram_dist.coverage_top_10 * 100:.1f}%",
+                            help="Какую долю текста покрывают 10 самых частых триграмм",
+                        )
+                    with col2:
+                        st.metric(
+                            "Hapax Legomena",
+                            f"{trigram_dist.hapax_legomena:,} ({trigram_dist.hapax_ratio * 100:.1f}%)",
+                            help="Триграммы, встречающиеся только один раз",
+                        )
+                    with col3:
+                        st.metric(
+                            "Zipf α (триграммы)",
+                            f"{trigram_dist.zipf_alpha:.2f} (R²={trigram_dist.zipf_r_squared:.3f})",
+                            help="Показатель степени закона Ципфа для триграмм",
+                        )
+                    
+                    # Visualizations
+                    viz_col1, viz_col2 = st.columns(2)
+                    
+                    with viz_col1:
+                        fig_trigram = create_ngram_distribution_chart(trigram_dist, top_k=15)
+                        st.plotly_chart(fig_trigram, use_container_width=True, key=f"trigram_dist_{key_suffix}_{id(result)}")
+                    
+                    with viz_col2:
+                        fig_trigram_zipf = create_ngram_zipf_chart(trigram_dist)
+                        st.plotly_chart(fig_trigram_zipf, use_container_width=True, key=f"trigram_zipf_{key_suffix}_{id(result)}")
+                    
+                    # Top trigrams table
+                    with st.expander("📋 Топ-20 триграмм букв", expanded=False):
+                        import polars as pl
+                        
+                        top_trigrams_data = {
+                            "Ранг": [ng.rank for ng in trigram_dist.top_ngrams[:20]],
+                            "Триграмма": [ng.ngram for ng in trigram_dist.top_ngrams[:20]],
+                            "Количество": [ng.count for ng in trigram_dist.top_ngrams[:20]],
+                            "Частота (%)": [f"{ng.frequency * 100:.2f}" for ng in trigram_dist.top_ngrams[:20]],
+                        }
+                        df_trigrams = pl.DataFrame(top_trigrams_data)
+                        st.dataframe(df_trigrams, use_container_width=True, hide_index=True)
+                
+                # Interpretation
+                st.divider()
+                st.markdown("### 💡 Интерпретация N-грамм анализа")
+                
+                st.markdown("""
+                **Что показывают N-граммы:**
+                - **Условная энтропия** — чем ниже, тем более предсказуемы последовательности букв
+                - **Hapax Legomena** — высокий процент указывает на богатство языковых конструкций
+                - **Покрытие топ-10** — низкое значение говорит о разнообразии сочетаний букв
+                - **Zipf α** — значения ~1.0 типичны для естественных текстов
+                
+                **Для стилометрии:**
+                - Разные авторы имеют характерные паттерны биграмм/триграмм
+                - Условная энтропия — стабильная метрика авторского стиля
+                - Топ-10 биграмм могут быть "отпечатком пальца" автора
+                """)
 
 
 def render_full_report(result):

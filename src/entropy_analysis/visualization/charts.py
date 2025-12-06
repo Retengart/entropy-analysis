@@ -13,7 +13,7 @@ from entropy_analysis.core.analyze import (
     BatchAnalysisResult,
     TextAnalysisResult,
 )
-from entropy_analysis.core.metrics import RollingEntropyResult
+from entropy_analysis.core.metrics import NgramDistributionResult, NgramComparisonResult, RollingEntropyResult
 
 # Color palette - high contrast for better readability
 COLORS = {
@@ -285,6 +285,8 @@ def create_correlation_scatter(
     show_trendline: bool = True,
     highlight_outliers: bool = True,
     label_top_n: int = 0,
+    outlier_method: str = "iqr",
+    outlier_threshold: float | None = None,
 ) -> go.Figure:
     """
     Create scatter plot of N vs H with correlation analysis.
@@ -294,6 +296,8 @@ def create_correlation_scatter(
         show_trendline: Whether to show linear regression line
         highlight_outliers: Whether to highlight outliers
         label_top_n: Number of highest-entropy points to label
+        outlier_method: Method for outlier detection ('iqr', 'zscore', 'modified_zscore')
+        outlier_threshold: Custom threshold for outlier detection (uses defaults if None)
 
     Returns:
         Plotly Figure
@@ -313,13 +317,40 @@ def create_correlation_scatter(
 
     # Determine outliers if requested
     outlier_mask = [False] * len(h_values)
-    if highlight_outliers and batch.extended_stats:
-        q1 = batch.extended_stats.q1
-        q3 = batch.extended_stats.q3
-        iqr = batch.extended_stats.iqr
-        lower = q1 - 1.5 * iqr
-        upper = q3 + 1.5 * iqr
-        outlier_mask = [h < lower or h > upper for h in h_values]
+    if highlight_outliers and batch.extended_stats and len(h_values) >= 3:
+        from entropy_analysis.core.stats import (
+            calculate_mad,
+            detect_outlier_iqr,
+            detect_outlier_modified_zscore,
+            detect_outlier_zscore,
+        )
+        
+        extended = batch.extended_stats
+        
+        for i, h in enumerate(h_values):
+            is_outlier = False
+            
+            if outlier_method == "iqr":
+                detection = detect_outlier_iqr(
+                    h, extended.q1, extended.q3, extended.iqr, 
+                    outlier_threshold if outlier_threshold is not None else 1.5
+                )
+                is_outlier = detection.is_outlier
+            elif outlier_method == "zscore":
+                detection = detect_outlier_zscore(
+                    h, extended.mean, extended.std_dev,
+                    outlier_threshold if outlier_threshold is not None else 3.0
+                )
+                is_outlier = detection.is_outlier
+            elif outlier_method == "modified_zscore":
+                mad = calculate_mad(h_values)
+                detection = detect_outlier_modified_zscore(
+                    h, extended.median, mad,
+                    outlier_threshold if outlier_threshold is not None else 3.5
+                )
+                is_outlier = detection.is_outlier
+            
+            outlier_mask[i] = is_outlier
 
     # Determine labels
     label_indices = set()
@@ -849,4 +880,332 @@ def create_bootstrap_plot(
 
     fig.update_layout(**layout)
 
+    return fig
+
+
+# ============================================================================
+# N-gram Distribution Visualization
+# ============================================================================
+
+
+def create_ngram_distribution_chart(
+    distribution: NgramDistributionResult,
+    top_k: int = 20,
+    title: str | None = None,
+) -> go.Figure:
+    """
+    Create bar chart showing top N-grams by frequency.
+    
+    Args:
+        distribution: N-gram distribution analysis result
+        top_k: Number of top n-grams to show
+        title: Optional custom title
+        
+    Returns:
+        Plotly Figure
+    """
+    if not distribution or not distribution.top_ngrams:
+        return go.Figure()
+    
+    # Get top-K n-grams
+    ngrams_to_show = distribution.top_ngrams[:top_k]
+    
+    ngram_labels = [ng.ngram for ng in ngrams_to_show]
+    frequencies = [ng.frequency * 100 for ng in ngrams_to_show]  # Convert to percentage
+    counts = [ng.count for ng in ngrams_to_show]
+    
+    fig = go.Figure()
+    
+    fig.add_trace(
+        go.Bar(
+            x=ngram_labels,
+            y=frequencies,
+            name="Частота (%)",
+            marker_color=COLORS["primary"],
+            hovertemplate="<b>%{x}</b><br>Частота: %{y:.2f}%<br>Количество: %{customdata}<extra></extra>",
+            customdata=counts,
+        )
+    )
+    
+    # Determine n-gram type name
+    ngram_type = "биграмм" if distribution.n == 2 else "триграмм" if distribution.n == 3 else f"{distribution.n}-грамм"
+    
+    if title is None:
+        title = f"Топ-{top_k} {ngram_type} букв"
+    
+    layout = _create_base_layout(
+        title,
+        xaxis_title=f"{distribution.n}-граммы",
+        yaxis_title="Частота (%)",
+    )
+    
+    fig.update_layout(**layout)
+    
+    # Add stats annotation
+    stats_text = (
+        f"Всего: {distribution.total_ngrams:,} | "
+        f"Уникальных: {distribution.unique_ngrams:,} | "
+        f"H: {distribution.entropy:.3f} бит"
+    )
+    
+    fig.add_annotation(
+        text=stats_text,
+        xref="paper",
+        yref="paper",
+        x=0.99,
+        y=1.02,
+        showarrow=False,
+        font={"size": 12, "color": COLORS["neutral"], "weight": 600},
+        xanchor="right",
+        bgcolor="rgba(255,255,255,0.9)",
+        bordercolor=COLORS["grid"],
+        borderwidth=1,
+        borderpad=4,
+    )
+    
+    return fig
+
+
+def create_ngram_zipf_chart(
+    distribution: NgramDistributionResult,
+    title: str | None = None,
+) -> go.Figure:
+    """
+    Create Zipf plot for n-gram distribution (log-log rank-frequency).
+    
+    Args:
+        distribution: N-gram distribution analysis result
+        title: Optional custom title
+        
+    Returns:
+        Plotly Figure
+    """
+    if not distribution or not distribution.top_ngrams:
+        return go.Figure()
+    
+    # Get all n-grams for Zipf plot
+    ranks = [ng.rank for ng in distribution.top_ngrams]
+    frequencies = [ng.count for ng in distribution.top_ngrams]
+    labels = [ng.ngram for ng in distribution.top_ngrams]
+    
+    fig = go.Figure()
+    
+    # Actual data
+    fig.add_trace(
+        go.Scatter(
+            x=ranks,
+            y=frequencies,
+            mode="markers",
+            name="Данные",
+            marker={"color": COLORS["primary"], "size": 8},
+            text=labels,
+            hovertemplate="<b>%{text}</b><br>Ранг: %{x}<br>Частота: %{y}<extra></extra>",
+        )
+    )
+    
+    # Zipf fit line
+    if distribution.zipf_alpha > 0 and distribution.zipf_r_squared > 0:
+        c = frequencies[0]
+        expected = [c / (r ** distribution.zipf_alpha) for r in ranks]
+        
+        fig.add_trace(
+            go.Scatter(
+                x=ranks,
+                y=expected,
+                mode="lines",
+                name=f"Ципф (α={distribution.zipf_alpha:.2f}, R²={distribution.zipf_r_squared:.3f})",
+                line={"color": COLORS["secondary"], "width": 2, "dash": "dash"},
+            )
+        )
+    
+    ngram_type = "биграмм" if distribution.n == 2 else "триграмм" if distribution.n == 3 else f"{distribution.n}-грамм"
+    
+    if title is None:
+        title = f"Закон Ципфа для {ngram_type} букв"
+    
+    layout = _create_base_layout(
+        title,
+        xaxis_title="Ранг",
+        yaxis_title="Частота",
+        xaxis_type="log",
+        yaxis_type="log",
+    )
+    
+    fig.update_layout(**layout)
+    
+    return fig
+
+
+def create_ngram_comparison_chart(
+    comparison: NgramComparisonResult,
+    author1_name: str = "Текст 1",
+    author2_name: str = "Текст 2",
+) -> go.Figure:
+    """
+    Create visualization comparing n-gram distributions between two texts.
+    
+    Shows:
+    - Venn diagram-style statistics
+    - Most distinguishing n-grams for each text
+    
+    Args:
+        comparison: N-gram comparison result
+        author1_name: Name for first text/author
+        author2_name: Name for second text/author
+        
+    Returns:
+        Plotly Figure with subplots
+    """
+    if not comparison:
+        return go.Figure()
+    
+    from plotly.subplots import make_subplots
+    
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=(
+            f"Характерные {comparison.n}-граммы: {author1_name}",
+            f"Характерные {comparison.n}-граммы: {author2_name}"
+        ),
+        horizontal_spacing=0.12,
+    )
+    
+    # Author 1 distinguishing n-grams
+    if comparison.top_diff_text1:
+        ngrams1 = [ng.ngram for ng in comparison.top_diff_text1]
+        freqs1 = [ng.frequency * 100 for ng in comparison.top_diff_text1]
+        
+        fig.add_trace(
+            go.Bar(
+                x=ngrams1,
+                y=freqs1,
+                name=author1_name,
+                marker_color=COLORS["primary"],
+                hovertemplate="<b>%{x}</b><br>Частота: %{y:.2f}%<extra></extra>",
+            ),
+            row=1, col=1
+        )
+    
+    # Author 2 distinguishing n-grams
+    if comparison.top_diff_text2:
+        ngrams2 = [ng.ngram for ng in comparison.top_diff_text2]
+        freqs2 = [ng.frequency * 100 for ng in comparison.top_diff_text2]
+        
+        fig.add_trace(
+            go.Bar(
+                x=ngrams2,
+                y=freqs2,
+                name=author2_name,
+                marker_color=COLORS["secondary"],
+                hovertemplate="<b>%{x}</b><br>Частота: %{y:.2f}%<extra></extra>",
+            ),
+            row=1, col=2
+        )
+    
+    ngram_type = "биграмм" if comparison.n == 2 else "триграмм" if comparison.n == 3 else f"{comparison.n}-грамм"
+    
+    fig.update_layout(
+        title={
+            "text": f"Сравнение распределений {ngram_type} букв",
+            "font": {"size": 18, "color": COLORS["neutral"]},
+        },
+        showlegend=False,
+        paper_bgcolor=COLORS["background"],
+        plot_bgcolor="white",
+        height=400,
+    )
+    
+    # Add comparison statistics as annotation
+    stats_text = (
+        f"Общих: {comparison.shared_ngrams} | "
+        f"Уникальных {author1_name}: {comparison.unique_to_text1} | "
+        f"Уникальных {author2_name}: {comparison.unique_to_text2}<br>"
+        f"Jaccard: {comparison.jaccard_similarity:.3f} | "
+        f"JS-дивергенция: {comparison.js_divergence:.4f} | "
+        f"Косинус: {comparison.cosine_similarity:.3f}"
+    )
+    
+    fig.add_annotation(
+        text=stats_text,
+        xref="paper",
+        yref="paper",
+        x=0.5,
+        y=-0.15,
+        showarrow=False,
+        font={"size": 12, "color": COLORS["neutral"]},
+        xanchor="center",
+    )
+    
+    return fig
+
+
+def create_ngram_stats_summary(
+    distribution: NgramDistributionResult,
+) -> go.Figure:
+    """
+    Create summary statistics visualization for n-gram distribution.
+    
+    Shows coverage, hapax, and other key metrics.
+    
+    Args:
+        distribution: N-gram distribution analysis result
+        
+    Returns:
+        Plotly Figure
+    """
+    if not distribution:
+        return go.Figure()
+    
+    fig = go.Figure()
+    
+    # Coverage bar chart
+    categories = ["Топ 10", "Топ 50", "Hapax"]
+    values = [
+        distribution.coverage_top_10 * 100,
+        distribution.coverage_top_50 * 100,
+        distribution.hapax_ratio * 100,
+    ]
+    colors = [COLORS["primary"], COLORS["secondary"], COLORS["accent"]]
+    
+    fig.add_trace(
+        go.Bar(
+            x=categories,
+            y=values,
+            marker_color=colors,
+            text=[f"{v:.1f}%" for v in values],
+            textposition="outside",
+            hovertemplate="<b>%{x}</b><br>%{y:.1f}%<extra></extra>",
+        )
+    )
+    
+    ngram_type = "биграмм" if distribution.n == 2 else "триграмм" if distribution.n == 3 else f"{distribution.n}-грамм"
+    
+    layout = _create_base_layout(
+        f"Статистика распределения {ngram_type}",
+        xaxis_title="Метрика",
+        yaxis_title="Процент (%)",
+    )
+    
+    layout["yaxis"]["range"] = [0, 100]
+    
+    fig.update_layout(**layout)
+    
+    # Add detailed stats annotation
+    stats_text = (
+        f"Энтропия: {distribution.entropy:.3f} бит | "
+        f"Условная H: {distribution.conditional_entropy:.3f} бит | "
+        f"Hapax: {distribution.hapax_legomena:,}"
+    )
+    
+    fig.add_annotation(
+        text=stats_text,
+        xref="paper",
+        yref="paper",
+        x=0.5,
+        y=1.08,
+        showarrow=False,
+        font={"size": 12, "color": COLORS["neutral"], "weight": 600},
+        xanchor="center",
+    )
+    
     return fig

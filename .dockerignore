@@ -66,7 +66,7 @@ results/
 # Development files
 Makefile
 .ruff_cache
-uv.lock
+# Note: uv.lock is needed for Docker builds to use --frozen flag
 
 # Large files
 *.parquet

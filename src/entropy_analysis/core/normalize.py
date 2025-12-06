@@ -125,6 +125,26 @@ class Normalizer:
             if normalized is not None:
                 yield normalized
 
+    def extract_all_letters(self, text: str) -> Iterator[str]:
+        """
+        Extract and normalize all letters from text (not just first letters).
+
+        This is useful for analyzing letter sequences, bigrams, and trigrams
+        at the letter level, providing deeper insight into text structure.
+
+        Yields normalized letters that pass validation.
+        """
+        for match in WORD_PATTERN.finditer(text):
+            token = match.group()
+            if len(token) < self.config.min_token_len:
+                continue
+
+            # Extract all letters from the token
+            for char in token:
+                normalized = self.normalize_char(char)
+                if normalized is not None:
+                    yield normalized
+
     def tokenize(self, text: str) -> list[str]:
         """
         Tokenize text into words.

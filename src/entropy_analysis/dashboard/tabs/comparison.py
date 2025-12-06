@@ -8,12 +8,14 @@ import polars as pl
 import streamlit as st
 
 from entropy_analysis.core.stats import compare_groups_statistically
-from entropy_analysis.dashboard.components.metrics import render_full_report, render_metrics
+from entropy_analysis.dashboard.components.metrics import render_advanced_metrics, render_full_report, render_metrics
+from entropy_analysis.core.metrics import compare_ngram_distributions
 from entropy_analysis.visualization.charts import (
     create_correlation_scatter,
     create_dual_author_comparison,
     create_entropy_histogram,
     create_letter_distribution_chart,
+    create_ngram_comparison_chart,
     create_radar_chart,
 )
 
@@ -195,6 +197,21 @@ def text_comparison(options):
         fig = create_radar_chart([result1, result2], [name1, name2])
         st.plotly_chart(fig, use_container_width=True, key=f"compare_radar_{id(result1)}_{id(result2)}")
 
+        # Advanced metrics for each text
+        st.subheader("🔬 Расширенные метрики")
+        
+        adv_col1, adv_col2 = st.columns(2)
+        
+        with adv_col1:
+            st.markdown(f"**{name1}**")
+            with st.expander("Показать расширенные метрики", expanded=False):
+                render_advanced_metrics(result1, key_suffix=f"compare_adv1_{id(result1)}")
+        
+        with adv_col2:
+            st.markdown(f"**{name2}**")
+            with st.expander("Показать расширенные метрики", expanded=False):
+                render_advanced_metrics(result2, key_suffix=f"compare_adv2_{id(result2)}")
+
 
 def author_comparison(options):
     """Compare two authors using split analysis."""
@@ -281,6 +298,53 @@ def author_comparison(options):
             step=1,
             help="Сегменты с меньшим количеством слов будут пропущены (помогает исключить аннотационные строки и заголовки)",
             key="comparison_min_words"
+        )
+    
+    # Outlier detection options
+    with st.expander("🔍 Настройки определения выбросов", expanded=False):
+        st.markdown("""
+        **Методы определения выбросов:**
+        - **IQR** (по умолчанию): Использует межквартильный размах. Хорош для нормальных распределений.
+        - **Z-score**: Использует стандартное отклонение. Эффективен для больших выборок.
+        - **Modified Z-score**: Использует медианное абсолютное отклонение (MAD). Устойчив к выбросам.
+        """)
+        
+        outlier_method = st.selectbox(
+            "Метод определения выбросов",
+            options=["iqr", "zscore", "modified_zscore"],
+            index=0,
+            help="Выберите метод для определения выбросов на графиках",
+            key="comparison_outlier_method"
+        )
+        
+        # Default thresholds for each method
+        default_thresholds = {
+            "iqr": 1.5,
+            "zscore": 3.0,
+            "modified_zscore": 3.5,
+        }
+        
+        threshold_help = {
+            "iqr": "Множитель IQR (по умолчанию 1.5). Больше значение = меньше выбросов",
+            "zscore": "Порог Z-score (по умолчанию 3.0). Больше значение = меньше выбросов",
+            "modified_zscore": "Порог Modified Z-score (по умолчанию 3.5). Больше значение = меньше выбросов",
+        }
+        
+        outlier_threshold = st.number_input(
+            f"Порог для {outlier_method.upper()}",
+            min_value=0.1,
+            max_value=10.0,
+            value=default_thresholds[outlier_method],
+            step=0.1,
+            help=threshold_help[outlier_method],
+            key="comparison_outlier_threshold"
+        )
+        
+        highlight_outliers = st.checkbox(
+            "Выделять выбросы на графиках",
+            value=True,
+            help="Если отключено, выбросы не будут выделяться отдельным цветом",
+            key="comparison_highlight_outliers"
         )
 
     if st.button("🔍 Сравнить авторов", type="primary", key="compare_authors_btn"):
@@ -371,11 +435,12 @@ def author_comparison(options):
         st.header("📊 Результаты сравнения")
 
         # Key metrics comparison
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
             [
                 "🎯 Ключевые различия",
                 "📊 Статистические тесты",
                 "📈 Корреляция H vs N",
+                "🔤 Сравнение N-грамм",
                 "🔬 Детальные метрики",
                 "📊 Распределения",
                 "📋 Таблицы",
@@ -528,6 +593,13 @@ def author_comparison(options):
             even1 = np.array([r.enhanced.evenness for _, r in batch1.results if r.enhanced])
             even2 = np.array([r.enhanced.evenness for _, r in batch2.results if r.enhanced])
 
+            # Letter-level n-gram entropies
+            letter_bigram1 = np.array([r.letter_bigram_entropy for _, r in batch1.results if r.letter_bigram_entropy is not None])
+            letter_bigram2 = np.array([r.letter_bigram_entropy for _, r in batch2.results if r.letter_bigram_entropy is not None])
+            
+            letter_trigram1 = np.array([r.letter_trigram_entropy for _, r in batch1.results if r.letter_trigram_entropy is not None])
+            letter_trigram2 = np.array([r.letter_trigram_entropy for _, r in batch2.results if r.letter_trigram_entropy is not None])
+
             # === ENTROPY COMPARISON ===
             st.subheader("1️⃣ Энтропия (H)")
 
@@ -672,36 +744,151 @@ def author_comparison(options):
 
             st.divider()
 
+            # === LETTER BIGRAM ENTROPY COMPARISON ===
+            if len(letter_bigram1) > 0 and len(letter_bigram2) > 0:
+                st.subheader("4️⃣ Энтропия биграмм букв (H₂)")
+
+                st.markdown("""
+                **Глубокая метрика**: Анализирует последовательности из двух букв подряд.
+                Показывает, насколько предсказуемы сочетания букв в тексте автора.
+                """)
+
+                comp_letter_bigram = compare_groups_statistically(
+                    letter_bigram1, letter_bigram2, n_permutations=5000, n_bootstrap=3000
+                )
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric(
+                        "Различие",
+                        f"{comp_letter_bigram.permutation_test.observed_difference:.4f}",
+                    )
+
+                    if comp_letter_bigram.permutation_test.is_significant:
+                        st.success("✅ **Статистически значимо!**")
+                    else:
+                        st.info("⚪ Незначимо")
+
+                with col2:
+                    st.metric(
+                        "p-value",
+                        f"{comp_letter_bigram.permutation_test.p_value:.4f}",
+                    )
+
+                with col3:
+                    st.metric(
+                        "Cohen's d",
+                        f"{comp_letter_bigram.effect_size.cohens_d:.3f}",
+                    )
+                    st.caption(f"{comp_letter_bigram.effect_size.effect_magnitude.title()} эффект")
+
+                st.markdown(
+                    f"**95% CI:** [{comp_letter_bigram.bootstrap_diff.ci_lower:.4f}, {comp_letter_bigram.bootstrap_diff.ci_upper:.4f}]"
+                )
+
+                st.divider()
+
+            # === LETTER TRIGRAM ENTROPY COMPARISON ===
+            if len(letter_trigram1) > 0 and len(letter_trigram2) > 0:
+                st.subheader("5️⃣ Энтропия триграмм букв (H₃)")
+
+                st.markdown("""
+                **Глубокая метрика**: Анализирует последовательности из трёх букв подряд.
+                Показывает контекстные зависимости и стилистические паттерны автора.
+                """)
+
+                comp_letter_trigram = compare_groups_statistically(
+                    letter_trigram1, letter_trigram2, n_permutations=5000, n_bootstrap=3000
+                )
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric(
+                        "Различие",
+                        f"{comp_letter_trigram.permutation_test.observed_difference:.4f}",
+                    )
+
+                    if comp_letter_trigram.permutation_test.is_significant:
+                        st.success("✅ **Статистически значимо!**")
+                    else:
+                        st.info("⚪ Незначимо")
+
+                with col2:
+                    st.metric(
+                        "p-value",
+                        f"{comp_letter_trigram.permutation_test.p_value:.4f}",
+                    )
+
+                with col3:
+                    st.metric(
+                        "Cohen's d",
+                        f"{comp_letter_trigram.effect_size.cohens_d:.3f}",
+                    )
+                    st.caption(f"{comp_letter_trigram.effect_size.effect_magnitude.title()} эффект")
+
+                st.markdown(
+                    f"**95% CI:** [{comp_letter_trigram.bootstrap_diff.ci_lower:.4f}, {comp_letter_trigram.bootstrap_diff.ci_upper:.4f}]"
+                )
+
+                st.divider()
+
             # === SUMMARY TABLE ===
             st.subheader("📋 Сводная таблица статистических тестов")
 
+            # Build summary table dynamically
+            metrics_list = ["Энтропия H", "Perplexity", "Evenness"]
+            differences_list = [
+                f"{comp_h.permutation_test.observed_difference:.4f}",
+                f"{comp_perp.permutation_test.observed_difference:.3f}",
+                f"{comp_even.permutation_test.observed_difference:.4f}",
+            ]
+            pvalues_list = [
+                f"{comp_h.permutation_test.p_value:.4f}",
+                f"{comp_perp.permutation_test.p_value:.4f}",
+                f"{comp_even.permutation_test.p_value:.4f}",
+            ]
+            cohens_d_list = [
+                f"{comp_h.effect_size.cohens_d:.3f}",
+                f"{comp_perp.effect_size.cohens_d:.3f}",
+                f"{comp_even.effect_size.cohens_d:.3f}",
+            ]
+            effects_list = [
+                comp_h.effect_size.effect_magnitude.title(),
+                comp_perp.effect_size.effect_magnitude.title(),
+                comp_even.effect_size.effect_magnitude.title(),
+            ]
+            significant_list = [
+                "✅ Да" if comp_h.permutation_test.is_significant else "⚪ Нет",
+                "✅ Да" if comp_perp.permutation_test.is_significant else "⚪ Нет",
+                "✅ Да" if comp_even.permutation_test.is_significant else "⚪ Нет",
+            ]
+
+            # Add letter-level metrics if available
+            if len(letter_bigram1) > 0 and len(letter_bigram2) > 0:
+                metrics_list.append("Энтропия биграмм букв (H₂)")
+                differences_list.append(f"{comp_letter_bigram.permutation_test.observed_difference:.4f}")
+                pvalues_list.append(f"{comp_letter_bigram.permutation_test.p_value:.4f}")
+                cohens_d_list.append(f"{comp_letter_bigram.effect_size.cohens_d:.3f}")
+                effects_list.append(comp_letter_bigram.effect_size.effect_magnitude.title())
+                significant_list.append("✅ Да" if comp_letter_bigram.permutation_test.is_significant else "⚪ Нет")
+
+            if len(letter_trigram1) > 0 and len(letter_trigram2) > 0:
+                metrics_list.append("Энтропия триграмм букв (H₃)")
+                differences_list.append(f"{comp_letter_trigram.permutation_test.observed_difference:.4f}")
+                pvalues_list.append(f"{comp_letter_trigram.permutation_test.p_value:.4f}")
+                cohens_d_list.append(f"{comp_letter_trigram.effect_size.cohens_d:.3f}")
+                effects_list.append(comp_letter_trigram.effect_size.effect_magnitude.title())
+                significant_list.append("✅ Да" if comp_letter_trigram.permutation_test.is_significant else "⚪ Нет")
+
             summary_data = {
-                "Метрика": ["Энтропия H", "Perplexity", "Evenness"],
-                "Различие": [
-                    f"{comp_h.permutation_test.observed_difference:.4f}",
-                    f"{comp_perp.permutation_test.observed_difference:.3f}",
-                    f"{comp_even.permutation_test.observed_difference:.4f}",
-                ],
-                "p-value": [
-                    f"{comp_h.permutation_test.p_value:.4f}",
-                    f"{comp_perp.permutation_test.p_value:.4f}",
-                    f"{comp_even.permutation_test.p_value:.4f}",
-                ],
-                "Cohen's d": [
-                    f"{comp_h.effect_size.cohens_d:.3f}",
-                    f"{comp_perp.effect_size.cohens_d:.3f}",
-                    f"{comp_even.effect_size.cohens_d:.3f}",
-                ],
-                "Эффект": [
-                    comp_h.effect_size.effect_magnitude.title(),
-                    comp_perp.effect_size.effect_magnitude.title(),
-                    comp_even.effect_size.effect_magnitude.title(),
-                ],
-                "Значимо?": [
-                    "✅ Да" if comp_h.permutation_test.is_significant else "⚪ Нет",
-                    "✅ Да" if comp_perp.permutation_test.is_significant else "⚪ Нет",
-                    "✅ Да" if comp_even.permutation_test.is_significant else "⚪ Нет",
-                ],
+                "Метрика": metrics_list,
+                "Различие": differences_list,
+                "p-value": pvalues_list,
+                "Cohen's d": cohens_d_list,
+                "Эффект": effects_list,
+                "Значимо?": significant_list,
             }
 
             df_summary = pl.DataFrame(summary_data)
@@ -712,33 +899,49 @@ def author_comparison(options):
             # === INTERPRETATION ===
             st.subheader("💡 Интерпретация")
 
-            # Count significant differences
-            n_significant = sum(
-                [
-                    comp_h.permutation_test.is_significant,
-                    comp_perp.permutation_test.is_significant,
-                    comp_even.permutation_test.is_significant,
-                ]
-            )
+            # Count significant differences (including letter-level metrics)
+            significant_metrics = [
+                comp_h.permutation_test.is_significant,
+                comp_perp.permutation_test.is_significant,
+                comp_even.permutation_test.is_significant,
+            ]
+            
+            if len(letter_bigram1) > 0 and len(letter_bigram2) > 0:
+                significant_metrics.append(comp_letter_bigram.permutation_test.is_significant)
+            if len(letter_trigram1) > 0 and len(letter_trigram2) > 0:
+                significant_metrics.append(comp_letter_trigram.permutation_test.is_significant)
+            
+            n_significant = sum(significant_metrics)
+            total_metrics = len(significant_metrics)
 
-            if n_significant == 3:
+            if n_significant == total_metrics:
                 st.success(f"""
-                **🎯 Авторы значимо различаются по всем трём ключевым метрикам!**
+                **🎯 Авторы значимо различаются по всем {total_metrics} метрикам!**
 
                 Это означает, что {author1_name} и {author2_name} имеют **объективно разные** стили письма.
                 Различия не являются случайными (p < 0.05 для всех метрик).
+                
+                {"✨ **Глубокий анализ подтверждает различия** на уровне буквенных последовательностей!" if total_metrics > 3 else ""}
                 """)
-            elif n_significant == 2:
+            elif n_significant >= total_metrics * 0.6:  # 60% or more
                 st.info(f"""
-                **📊 Авторы значимо различаются по {n_significant} из 3 метрик.**
+                **📊 Авторы значимо различаются по {n_significant} из {total_metrics} метрик.**
 
                 Есть статистически подтверждённые различия в стилях.
+                {"Включая различия на уровне буквенных последовательностей!" if any([
+                    len(letter_bigram1) > 0 and len(letter_bigram2) > 0 and comp_letter_bigram.permutation_test.is_significant,
+                    len(letter_trigram1) > 0 and len(letter_trigram2) > 0 and comp_letter_trigram.permutation_test.is_significant,
+                ]) else ""}
                 """)
-            elif n_significant == 1:
+            elif n_significant > 0:
                 st.warning(f"""
-                **⚠️ Авторы различаются только по {n_significant} метрике.**
+                **⚠️ Авторы различаются только по {n_significant} из {total_metrics} метрик.**
 
                 Различия частичные, авторы в целом похожи.
+                {"Однако обнаружены различия на уровне буквенных последовательностей!" if any([
+                    len(letter_bigram1) > 0 and len(letter_bigram2) > 0 and comp_letter_bigram.permutation_test.is_significant,
+                    len(letter_trigram1) > 0 and len(letter_trigram2) > 0 and comp_letter_trigram.permutation_test.is_significant,
+                ]) else ""}
                 """)
             else:
                 st.error("""
@@ -757,6 +960,10 @@ def author_comparison(options):
                 large_effects.append("Perplexity")
             if abs(comp_even.effect_size.cohens_d) > 0.8:
                 large_effects.append("Evenness")
+            if len(letter_bigram1) > 0 and len(letter_bigram2) > 0 and abs(comp_letter_bigram.effect_size.cohens_d) > 0.8:
+                large_effects.append("Энтропия биграмм букв")
+            if len(letter_trigram1) > 0 and len(letter_trigram2) > 0 and abs(comp_letter_trigram.effect_size.cohens_d) > 0.8:
+                large_effects.append("Энтропия триграмм букв")
 
             if large_effects:
                 st.success(f"🔵 **Большие эффекты** (d > 0.8): {', '.join(large_effects)}")
@@ -775,17 +982,227 @@ def author_comparison(options):
 
             with col1:
                 st.markdown(f"**{author1_name}**")
-                fig1 = create_correlation_scatter(batch1, show_trendline=True)
+                fig1 = create_correlation_scatter(
+                    batch1, 
+                    show_trendline=True,
+                    highlight_outliers=highlight_outliers,
+                    outlier_method=outlier_method,
+                    outlier_threshold=outlier_threshold,
+                )
                 fig1.update_layout(height=400, title=f"{author1_name}: H vs N")
                 st.plotly_chart(fig1, use_container_width=True, key=f"author_compare_scatter1_{id(batch1)}")
 
             with col2:
                 st.markdown(f"**{author2_name}**")
-                fig2 = create_correlation_scatter(batch2, show_trendline=True)
+                fig2 = create_correlation_scatter(
+                    batch2, 
+                    show_trendline=True,
+                    highlight_outliers=highlight_outliers,
+                    outlier_method=outlier_method,
+                    outlier_threshold=outlier_threshold,
+                )
                 fig2.update_layout(height=400, title=f"{author2_name}: H vs N")
                 st.plotly_chart(fig2, use_container_width=True, key=f"author_compare_scatter2_{id(batch2)}")
 
         with tab4:
+            st.subheader("🔤 Сравнение распределений N-грамм букв")
+            
+            st.markdown("""
+            **Глубокий анализ характерных последовательностей букв для каждого автора.**
+            
+            Этот анализ показывает:
+            - Какие биграммы/триграммы наиболее характерны для каждого автора
+            - Насколько различаются распределения n-грамм
+            - Уникальные и общие n-граммы
+            """)
+            
+            # Collect all letters from all texts for each author
+            all_letters1: list[str] = []
+            all_letters2: list[str] = []
+            
+            for _, result in batch1.results:
+                if result.letter_bigram_distribution:
+                    # We need to get the raw letters - let's use a workaround
+                    # by collecting from segment names or re-extracting
+                    pass
+            
+            # Use the normalizer to extract letters from original texts
+            # Since we don't have the original texts here, we'll aggregate from results
+            # Instead, let's compare average distributions
+            
+            # Compare bigram distributions if available
+            st.markdown("### Биграммы букв")
+            
+            # Get average bigram stats from both authors
+            bigram_stats1 = []
+            bigram_stats2 = []
+            
+            for _, result in batch1.results:
+                if result.letter_bigram_distribution:
+                    bigram_stats1.append({
+                        "entropy": result.letter_bigram_distribution.entropy,
+                        "conditional": result.letter_bigram_distribution.conditional_entropy,
+                        "unique": result.letter_bigram_distribution.unique_ngrams,
+                        "hapax_ratio": result.letter_bigram_distribution.hapax_ratio,
+                        "coverage_10": result.letter_bigram_distribution.coverage_top_10,
+                        "zipf_alpha": result.letter_bigram_distribution.zipf_alpha,
+                    })
+            
+            for _, result in batch2.results:
+                if result.letter_bigram_distribution:
+                    bigram_stats2.append({
+                        "entropy": result.letter_bigram_distribution.entropy,
+                        "conditional": result.letter_bigram_distribution.conditional_entropy,
+                        "unique": result.letter_bigram_distribution.unique_ngrams,
+                        "hapax_ratio": result.letter_bigram_distribution.hapax_ratio,
+                        "coverage_10": result.letter_bigram_distribution.coverage_top_10,
+                        "zipf_alpha": result.letter_bigram_distribution.zipf_alpha,
+                    })
+            
+            if bigram_stats1 and bigram_stats2:
+                # Calculate averages
+                avg_bigram1 = {k: np.mean([s[k] for s in bigram_stats1]) for k in bigram_stats1[0].keys()}
+                avg_bigram2 = {k: np.mean([s[k] for s in bigram_stats2]) for k in bigram_stats2[0].keys()}
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown(f"**{author1_name}**")
+                    st.metric("Сред. энтропия биграмм", f"{avg_bigram1['entropy']:.3f} бит")
+                    st.metric("Сред. условная H(X₂|X₁)", f"{avg_bigram1['conditional']:.3f} бит")
+                    st.metric("Сред. Hapax ratio", f"{avg_bigram1['hapax_ratio'] * 100:.1f}%")
+                    st.metric("Сред. покрытие топ-10", f"{avg_bigram1['coverage_10'] * 100:.1f}%")
+                    st.metric("Сред. Zipf α", f"{avg_bigram1['zipf_alpha']:.2f}")
+                
+                with col2:
+                    st.markdown(f"**{author2_name}**")
+                    diff_h = avg_bigram2['entropy'] - avg_bigram1['entropy']
+                    st.metric("Сред. энтропия биграмм", f"{avg_bigram2['entropy']:.3f} бит", delta=f"{diff_h:+.3f}")
+                    diff_cond = avg_bigram2['conditional'] - avg_bigram1['conditional']
+                    st.metric("Сред. условная H(X₂|X₁)", f"{avg_bigram2['conditional']:.3f} бит", delta=f"{diff_cond:+.3f}")
+                    diff_hapax = (avg_bigram2['hapax_ratio'] - avg_bigram1['hapax_ratio']) * 100
+                    st.metric("Сред. Hapax ratio", f"{avg_bigram2['hapax_ratio'] * 100:.1f}%", delta=f"{diff_hapax:+.1f}%")
+                    diff_cov = (avg_bigram2['coverage_10'] - avg_bigram1['coverage_10']) * 100
+                    st.metric("Сред. покрытие топ-10", f"{avg_bigram2['coverage_10'] * 100:.1f}%", delta=f"{diff_cov:+.1f}%")
+                    diff_zipf = avg_bigram2['zipf_alpha'] - avg_bigram1['zipf_alpha']
+                    st.metric("Сред. Zipf α", f"{avg_bigram2['zipf_alpha']:.2f}", delta=f"{diff_zipf:+.2f}")
+                
+                # Statistical comparison of bigram entropy
+                bigram_h1 = np.array([s["entropy"] for s in bigram_stats1])
+                bigram_h2 = np.array([s["entropy"] for s in bigram_stats2])
+                
+                if len(bigram_h1) >= 5 and len(bigram_h2) >= 5:
+                    st.divider()
+                    st.markdown("**Статистический тест различия энтропии биграмм:**")
+                    
+                    comp_bigram_h = compare_groups_statistically(bigram_h1, bigram_h2, n_permutations=3000, n_bootstrap=2000)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Различие", f"{comp_bigram_h.permutation_test.observed_difference:.4f}")
+                    with col2:
+                        st.metric("p-value", f"{comp_bigram_h.permutation_test.p_value:.4f}")
+                    with col3:
+                        st.metric("Cohen's d", f"{comp_bigram_h.effect_size.cohens_d:.3f}")
+                    
+                    if comp_bigram_h.permutation_test.is_significant:
+                        st.success("✅ Различие в энтропии биграмм статистически значимо!")
+                    else:
+                        st.info("⚪ Различие в энтропии биграмм незначимо")
+            else:
+                st.warning("Недостаточно данных для сравнения биграмм")
+            
+            st.divider()
+            
+            # Compare trigram distributions
+            st.markdown("### Триграммы букв")
+            
+            trigram_stats1 = []
+            trigram_stats2 = []
+            
+            for _, result in batch1.results:
+                if result.letter_trigram_distribution:
+                    trigram_stats1.append({
+                        "entropy": result.letter_trigram_distribution.entropy,
+                        "conditional": result.letter_trigram_distribution.conditional_entropy,
+                        "unique": result.letter_trigram_distribution.unique_ngrams,
+                        "hapax_ratio": result.letter_trigram_distribution.hapax_ratio,
+                        "coverage_10": result.letter_trigram_distribution.coverage_top_10,
+                        "zipf_alpha": result.letter_trigram_distribution.zipf_alpha,
+                    })
+            
+            for _, result in batch2.results:
+                if result.letter_trigram_distribution:
+                    trigram_stats2.append({
+                        "entropy": result.letter_trigram_distribution.entropy,
+                        "conditional": result.letter_trigram_distribution.conditional_entropy,
+                        "unique": result.letter_trigram_distribution.unique_ngrams,
+                        "hapax_ratio": result.letter_trigram_distribution.hapax_ratio,
+                        "coverage_10": result.letter_trigram_distribution.coverage_top_10,
+                        "zipf_alpha": result.letter_trigram_distribution.zipf_alpha,
+                    })
+            
+            if trigram_stats1 and trigram_stats2:
+                avg_trigram1 = {k: np.mean([s[k] for s in trigram_stats1]) for k in trigram_stats1[0].keys()}
+                avg_trigram2 = {k: np.mean([s[k] for s in trigram_stats2]) for k in trigram_stats2[0].keys()}
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown(f"**{author1_name}**")
+                    st.metric("Сред. энтропия триграмм", f"{avg_trigram1['entropy']:.3f} бит")
+                    st.metric("Сред. условная H(X₃|X₁X₂)", f"{avg_trigram1['conditional']:.3f} бит")
+                    st.metric("Сред. Hapax ratio", f"{avg_trigram1['hapax_ratio'] * 100:.1f}%")
+                
+                with col2:
+                    st.markdown(f"**{author2_name}**")
+                    diff_h = avg_trigram2['entropy'] - avg_trigram1['entropy']
+                    st.metric("Сред. энтропия триграмм", f"{avg_trigram2['entropy']:.3f} бит", delta=f"{diff_h:+.3f}")
+                    diff_cond = avg_trigram2['conditional'] - avg_trigram1['conditional']
+                    st.metric("Сред. условная H(X₃|X₁X₂)", f"{avg_trigram2['conditional']:.3f} бит", delta=f"{diff_cond:+.3f}")
+                    diff_hapax = (avg_trigram2['hapax_ratio'] - avg_trigram1['hapax_ratio']) * 100
+                    st.metric("Сред. Hapax ratio", f"{avg_trigram2['hapax_ratio'] * 100:.1f}%", delta=f"{diff_hapax:+.1f}%")
+                
+                # Statistical comparison of trigram entropy
+                trigram_h1 = np.array([s["entropy"] for s in trigram_stats1])
+                trigram_h2 = np.array([s["entropy"] for s in trigram_stats2])
+                
+                if len(trigram_h1) >= 5 and len(trigram_h2) >= 5:
+                    st.divider()
+                    st.markdown("**Статистический тест различия энтропии триграмм:**")
+                    
+                    comp_trigram_h = compare_groups_statistically(trigram_h1, trigram_h2, n_permutations=3000, n_bootstrap=2000)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Различие", f"{comp_trigram_h.permutation_test.observed_difference:.4f}")
+                    with col2:
+                        st.metric("p-value", f"{comp_trigram_h.permutation_test.p_value:.4f}")
+                    with col3:
+                        st.metric("Cohen's d", f"{comp_trigram_h.effect_size.cohens_d:.3f}")
+                    
+                    if comp_trigram_h.permutation_test.is_significant:
+                        st.success("✅ Различие в энтропии триграмм статистически значимо!")
+                    else:
+                        st.info("⚪ Различие в энтропии триграмм незначимо")
+            else:
+                st.warning("Недостаточно данных для сравнения триграмм")
+            
+            # Interpretation
+            st.divider()
+            st.markdown("### 💡 Интерпретация")
+            st.markdown("""
+            **Ключевые выводы из сравнения N-грамм:**
+            
+            - **Условная энтропия** показывает, насколько предсказуемы последовательности букв у каждого автора
+            - Более низкая условная энтропия = более "предсказуемый" стиль письма
+            - **Hapax ratio** указывает на разнообразие буквенных сочетаний
+            - **Покрытие топ-10** показывает, насколько текст "сконцентрирован" на нескольких частых n-граммах
+            
+            Если авторы значимо различаются по этим метрикам, это надёжный индикатор разных стилей письма.
+            """)
+
+        with tab5:
             st.subheader("🔬 Детальное сравнение метрик")
 
             # Side-by-side metrics
@@ -878,7 +1295,7 @@ def author_comparison(options):
 
             st.plotly_chart(fig, use_container_width=True, key=f"author_compare_renyi_{id(batch1)}_{id(batch2)}")
 
-        with tab5:
+        with tab6:
             st.subheader("📊 Распределения метрик")
 
             # Entropy histograms
@@ -896,7 +1313,7 @@ def author_comparison(options):
                 fig2.update_layout(height=350)
                 st.plotly_chart(fig2, use_container_width=True, key=f"author_compare_hist2_{id(batch2)}")
 
-        with tab6:
+        with tab7:
             st.subheader("📋 Таблицы данных")
 
             col1, col2 = st.columns(2)
@@ -929,7 +1346,7 @@ def author_comparison(options):
                     key="download2",
                 )
                 
-        with tab7:
+        with tab8:
             st.header("Полный сравнительный отчет")
             
             st.subheader(f"👤 {author1_name}")

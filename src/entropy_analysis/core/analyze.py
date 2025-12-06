@@ -18,6 +18,7 @@ from entropy_analysis.core.attribution import (
     calculate_z_scores,
 )
 from entropy_analysis.core.metrics import (
+    NgramDistributionResult,
     calculate_average_gries_dp,
     calculate_average_pierrehumbert_beta,
     calculate_burstiness_index,
@@ -28,6 +29,7 @@ from entropy_analysis.core.metrics import (
     calculate_kl_divergence,
     calculate_mattr,
     calculate_mtld,
+    calculate_ngram_distribution,
     calculate_ngram_entropy,
     calculate_readability,
     calculate_rolling_entropy,
@@ -112,9 +114,13 @@ class TextAnalysisResult:
     mtld: float | None = None
     mattr: float | None = None
     gries_dp: float | None = None  # Average normalized DP
-    bigram_entropy: float | None = None
-    trigram_entropy: float | None = None
+    bigram_entropy: float | None = None  # Word-level bigram entropy
+    trigram_entropy: float | None = None  # Word-level trigram entropy
     burstiness: float | None = None
+    
+    # LETTER-LEVEL N-GRAMS (for deeper analysis)
+    letter_bigram_entropy: float | None = None  # Letter-level bigram entropy
+    letter_trigram_entropy: float | None = None  # Letter-level trigram entropy
     
     # PHASE 2 METRICS
     hurst_exponent: float | None = None  # Hurst H from DFA
@@ -127,6 +133,10 @@ class TextAnalysisResult:
     gunning_fog_index: float | None = None  # Gunning Fog Index (grade level)
     avg_sentence_length: float | None = None  # Average words per sentence
     avg_syllables_per_word: float | None = None  # Average syllables per word
+
+    # N-GRAM DISTRIBUTION ANALYSIS (for 9.5/10 accuracy)
+    letter_bigram_distribution: NgramDistributionResult | None = None
+    letter_trigram_distribution: NgramDistributionResult | None = None
 
     # Metadata
     source_name: str | None = None
@@ -283,6 +293,14 @@ class TextAnalyzer:
         trigram_h = None
         burstiness = None
         
+        # Letter-level n-gram entropies
+        letter_bigram_h = None
+        letter_trigram_h = None
+        
+        # N-gram distribution analysis
+        letter_bigram_dist = None
+        letter_trigram_dist = None
+        
         # Phase 2 metrics
         hurst_result = None
         zipf_mandelbrot = None
@@ -357,8 +375,23 @@ class TextAnalyzer:
                 bigram_h = calculate_ngram_entropy(tokens, n=2)
                 trigram_h = calculate_ngram_entropy(tokens, n=3)
                 burstiness = calculate_burstiness_index(tokens)
-                
-                # Phase 2: Advanced metrics (optional, computationally expensive)
+            
+            # Letter-level n-gram entropies (for deeper analysis)
+            log("Расчет энтропии биграмм и триграмм букв...")
+            all_letters = list(self.normalizer.extract_all_letters(text))
+            if len(all_letters) >= 2:
+                letter_bigram_h = calculate_ngram_entropy(all_letters, n=2)
+                # Full distribution analysis for bigrams
+                log("Расчет распределения биграмм букв...")
+                letter_bigram_dist = calculate_ngram_distribution(all_letters, n=2, top_k=30)
+            if len(all_letters) >= 3:
+                letter_trigram_h = calculate_ngram_entropy(all_letters, n=3)
+                # Full distribution analysis for trigrams
+                log("Расчет распределения триграмм букв...")
+                letter_trigram_dist = calculate_ngram_distribution(all_letters, n=3, top_k=30)
+            
+            # Phase 2: Advanced metrics (optional, computationally expensive)
+            if tokens:
                 if include_advanced_metrics:
                     log("Расчет продвинутых метрик (Hurst, Zipf-Mandelbrot, Pierrehumbert)...")
                     
@@ -404,6 +437,10 @@ class TextAnalyzer:
             bigram_entropy=bigram_h,
             trigram_entropy=trigram_h,
             burstiness=burstiness,
+            letter_bigram_entropy=letter_bigram_h,
+            letter_trigram_entropy=letter_trigram_h,
+            letter_bigram_distribution=letter_bigram_dist,
+            letter_trigram_distribution=letter_trigram_dist,
             hurst_exponent=hurst_result.hurst_exponent if hurst_result else None,
             zipf_mandelbrot_alpha=zipf_mandelbrot.alpha if zipf_mandelbrot else None,
             zipf_mandelbrot_beta=zipf_mandelbrot.beta if zipf_mandelbrot else None,
@@ -701,6 +738,8 @@ class TextAnalyzer:
             "gries_dp": [],
             "bigram_entropy": [],
             "trigram_entropy": [],
+            "letter_bigram_entropy": [],
+            "letter_trigram_entropy": [],
             "burstiness": [],
             "hurst_exponent": [],
             "zipf_mandelbrot_alpha": [],
@@ -725,6 +764,8 @@ class TextAnalyzer:
             data["gries_dp"].append(result.gries_dp)
             data["bigram_entropy"].append(result.bigram_entropy)
             data["trigram_entropy"].append(result.trigram_entropy)
+            data["letter_bigram_entropy"].append(result.letter_bigram_entropy)
+            data["letter_trigram_entropy"].append(result.letter_trigram_entropy)
             data["burstiness"].append(result.burstiness)
             data["hurst_exponent"].append(result.hurst_exponent)
             data["zipf_mandelbrot_alpha"].append(result.zipf_mandelbrot_alpha)

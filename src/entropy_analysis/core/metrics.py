@@ -1550,3 +1550,289 @@ def calculate_average_pierrehumbert_beta(
         return None
 
     return float(np.mean(beta_values))
+
+
+# ============================================================================
+# N-gram Distribution Analysis (for 9.5/10 accuracy)
+# ============================================================================
+
+
+@dataclass
+class NgramStats:
+    """Statistics for a single n-gram."""
+    
+    ngram: str  # The n-gram as string (e.g., "пр", "при")
+    count: int  # Absolute frequency
+    frequency: float  # Relative frequency (probability)
+    rank: int  # Rank by frequency (1 = most frequent)
+
+
+@dataclass
+class NgramDistributionResult:
+    """Complete n-gram distribution analysis result."""
+    
+    n: int  # N-gram order (2 for bigrams, 3 for trigrams)
+    total_ngrams: int  # Total number of n-grams in text
+    unique_ngrams: int  # Number of unique n-grams
+    
+    # Top n-grams by frequency
+    top_ngrams: list[NgramStats]
+    
+    # Entropy metrics
+    entropy: float  # Shannon entropy of n-gram distribution
+    conditional_entropy: float  # H(Xn | X1...Xn-1)
+    
+    # Zipf analysis for n-grams
+    zipf_alpha: float  # Zipf exponent
+    zipf_r_squared: float  # Goodness of fit
+    
+    # Distribution characteristics
+    hapax_legomena: int  # N-grams appearing exactly once
+    hapax_ratio: float  # Ratio of hapax to total unique
+    coverage_top_10: float  # What fraction of text is covered by top 10 n-grams
+    coverage_top_50: float  # What fraction of text is covered by top 50 n-grams
+
+
+def calculate_ngram_distribution(
+    tokens: Sequence[str],
+    n: int = 2,
+    top_k: int = 50,
+) -> NgramDistributionResult | None:
+    """
+    Calculate comprehensive n-gram distribution analysis.
+    
+    Provides not just entropy, but full distribution statistics including:
+    - Top-K most frequent n-grams with counts and frequencies
+    - Zipf analysis for n-gram distribution
+    - Hapax legomena (n-grams appearing once)
+    - Coverage statistics
+    
+    Args:
+        tokens: Sequence of tokens (letters or words)
+        n: N-gram order (2 for bigrams, 3 for trigrams)
+        top_k: Number of top n-grams to return
+        
+    Returns:
+        NgramDistributionResult or None if insufficient data
+    """
+    if len(tokens) < n:
+        return None
+    
+    # Generate n-grams
+    ngrams = [tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1)]
+    
+    if not ngrams:
+        return None
+    
+    # Count n-grams
+    ngram_counts = Counter(ngrams)
+    total_ngrams = len(ngrams)
+    unique_ngrams = len(ngram_counts)
+    
+    # Sort by frequency (descending)
+    sorted_ngrams = ngram_counts.most_common()
+    
+    # Build top-K stats
+    top_ngrams: list[NgramStats] = []
+    for rank, (ngram_tuple, count) in enumerate(sorted_ngrams[:top_k], 1):
+        ngram_str = "".join(ngram_tuple) if all(isinstance(t, str) and len(t) == 1 for t in ngram_tuple) else " ".join(ngram_tuple)
+        freq = count / total_ngrams
+        top_ngrams.append(NgramStats(
+            ngram=ngram_str,
+            count=count,
+            frequency=freq,
+            rank=rank,
+        ))
+    
+    # Calculate entropy of n-gram distribution
+    counts_array = np.array(list(ngram_counts.values()), dtype=np.float64)
+    probs = counts_array / total_ngrams
+    entropy = float(-np.sum(probs * np.log2(probs)))
+    
+    # Calculate conditional entropy H(Xn | X1...Xn-1)
+    # H(Xn|X1...Xn-1) = H(X1...Xn) - H(X1...Xn-1)
+    conditional_entropy = calculate_ngram_entropy(tokens, n)
+    
+    # Zipf analysis for n-grams
+    sorted_counts = np.sort(counts_array)[::-1]
+    sorted_counts = sorted_counts[sorted_counts > 0]
+    
+    zipf_alpha = 0.0
+    zipf_r_squared = 0.0
+    
+    if len(sorted_counts) >= 3:
+        ranks = np.arange(1, len(sorted_counts) + 1, dtype=np.float64)
+        log_ranks = np.log(ranks)
+        log_counts = np.log(sorted_counts)
+        
+        slope, intercept, r_value, _, _ = stats.linregress(log_ranks, log_counts)
+        zipf_alpha = float(-slope)
+        zipf_r_squared = float(r_value ** 2)
+    
+    # Hapax legomena (n-grams appearing exactly once)
+    hapax_count = sum(1 for count in ngram_counts.values() if count == 1)
+    hapax_ratio = hapax_count / unique_ngrams if unique_ngrams > 0 else 0.0
+    
+    # Coverage statistics
+    cumsum = np.cumsum(sorted_counts)
+    coverage_top_10 = float(cumsum[min(9, len(cumsum) - 1)] / total_ngrams) if len(cumsum) > 0 else 0.0
+    coverage_top_50 = float(cumsum[min(49, len(cumsum) - 1)] / total_ngrams) if len(cumsum) > 0 else 0.0
+    
+    return NgramDistributionResult(
+        n=n,
+        total_ngrams=total_ngrams,
+        unique_ngrams=unique_ngrams,
+        top_ngrams=top_ngrams,
+        entropy=entropy,
+        conditional_entropy=conditional_entropy,
+        zipf_alpha=zipf_alpha,
+        zipf_r_squared=zipf_r_squared,
+        hapax_legomena=hapax_count,
+        hapax_ratio=float(hapax_ratio),
+        coverage_top_10=coverage_top_10,
+        coverage_top_50=coverage_top_50,
+    )
+
+
+@dataclass
+class NgramComparisonResult:
+    """Result of comparing n-gram distributions between two texts."""
+    
+    n: int  # N-gram order
+    
+    # Shared vs unique n-grams
+    shared_ngrams: int  # N-grams present in both texts
+    unique_to_text1: int  # N-grams only in text 1
+    unique_to_text2: int  # N-grams only in text 2
+    jaccard_similarity: float  # |intersection| / |union|
+    
+    # Distribution divergence
+    js_divergence: float  # Jensen-Shannon divergence
+    cosine_similarity: float  # Cosine similarity of frequency vectors
+    
+    # Top differing n-grams
+    top_diff_text1: list[NgramStats]  # N-grams much more frequent in text 1
+    top_diff_text2: list[NgramStats]  # N-grams much more frequent in text 2
+
+
+def compare_ngram_distributions(
+    tokens1: Sequence[str],
+    tokens2: Sequence[str],
+    n: int = 2,
+    top_k_diff: int = 10,
+) -> NgramComparisonResult | None:
+    """
+    Compare n-gram distributions between two texts.
+    
+    Provides detailed comparison including:
+    - Shared vs unique n-grams
+    - Distribution similarity metrics
+    - Most distinguishing n-grams for each text
+    
+    Args:
+        tokens1: Tokens from first text
+        tokens2: Tokens from second text
+        n: N-gram order
+        top_k_diff: Number of top differentiating n-grams to return
+        
+    Returns:
+        NgramComparisonResult or None if insufficient data
+    """
+    if len(tokens1) < n or len(tokens2) < n:
+        return None
+    
+    # Generate n-grams
+    ngrams1 = [tuple(tokens1[i:i + n]) for i in range(len(tokens1) - n + 1)]
+    ngrams2 = [tuple(tokens2[i:i + n]) for i in range(len(tokens2) - n + 1)]
+    
+    if not ngrams1 or not ngrams2:
+        return None
+    
+    # Count n-grams
+    counts1 = Counter(ngrams1)
+    counts2 = Counter(ngrams2)
+    
+    total1 = len(ngrams1)
+    total2 = len(ngrams2)
+    
+    # Set operations
+    set1 = set(counts1.keys())
+    set2 = set(counts2.keys())
+    
+    shared = set1 & set2
+    unique1 = set1 - set2
+    unique2 = set2 - set1
+    union = set1 | set2
+    
+    jaccard = len(shared) / len(union) if union else 0.0
+    
+    # Build frequency vectors for shared vocabulary + unique
+    all_ngrams = list(union)
+    freq1 = np.array([counts1.get(ng, 0) / total1 for ng in all_ngrams])
+    freq2 = np.array([counts2.get(ng, 0) / total2 for ng in all_ngrams])
+    
+    # Jensen-Shannon divergence
+    js_div = float(jensenshannon(freq1, freq2, base=2) ** 2)
+    
+    # Cosine similarity
+    norm1 = np.linalg.norm(freq1)
+    norm2 = np.linalg.norm(freq2)
+    cosine_sim = float(np.dot(freq1, freq2) / (norm1 * norm2)) if norm1 > 0 and norm2 > 0 else 0.0
+    
+    # Find most differentiating n-grams
+    # Score = (freq_in_text - freq_in_other) / max(freq_in_other, 0.0001)
+    diff_scores1: list[tuple[tuple, float, int]] = []
+    diff_scores2: list[tuple[tuple, float, int]] = []
+    
+    for ng in all_ngrams:
+        f1 = counts1.get(ng, 0) / total1
+        f2 = counts2.get(ng, 0) / total2
+        
+        # Prefer n-grams that are frequent in one text and rare/absent in other
+        if f1 > f2 and counts1.get(ng, 0) >= 3:
+            score = (f1 - f2) / max(f2, 0.0001)
+            diff_scores1.append((ng, score, counts1.get(ng, 0)))
+        elif f2 > f1 and counts2.get(ng, 0) >= 3:
+            score = (f2 - f1) / max(f1, 0.0001)
+            diff_scores2.append((ng, score, counts2.get(ng, 0)))
+    
+    # Sort by score and take top-K
+    diff_scores1.sort(key=lambda x: x[1], reverse=True)
+    diff_scores2.sort(key=lambda x: x[1], reverse=True)
+    
+    def make_ngram_str(ng_tuple):
+        if all(isinstance(t, str) and len(t) == 1 for t in ng_tuple):
+            return "".join(ng_tuple)
+        return " ".join(ng_tuple)
+    
+    top_diff1 = [
+        NgramStats(
+            ngram=make_ngram_str(ng),
+            count=count,
+            frequency=count / total1,
+            rank=i + 1,
+        )
+        for i, (ng, score, count) in enumerate(diff_scores1[:top_k_diff])
+    ]
+    
+    top_diff2 = [
+        NgramStats(
+            ngram=make_ngram_str(ng),
+            count=count,
+            frequency=count / total2,
+            rank=i + 1,
+        )
+        for i, (ng, score, count) in enumerate(diff_scores2[:top_k_diff])
+    ]
+    
+    return NgramComparisonResult(
+        n=n,
+        shared_ngrams=len(shared),
+        unique_to_text1=len(unique1),
+        unique_to_text2=len(unique2),
+        jaccard_similarity=float(jaccard),
+        js_divergence=js_div,
+        cosine_similarity=cosine_sim,
+        top_diff_text1=top_diff1,
+        top_diff_text2=top_diff2,
+    )
