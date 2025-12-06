@@ -844,30 +844,24 @@ class TextAnalyzer:
             )
 
         # Filter out short segments (annotation lines, etc.)
-        # Count words in each segment to determine if it's substantial
+        # Count words using the same method as analysis (only words with valid first letters)
         filtered_segments: list[str] = []
         skipped_count = 0
         
         for segment in segments:
-            # Count words (simple heuristic: split by whitespace and count non-empty tokens)
-            words = [w for w in segment.split() if w.strip()]
-            word_count = len(words)
+            # Count words using the same method as analysis - only words with valid first letters
+            # This ensures consistency: if a segment passes filtering, it will have enough words for analysis
+            letter_counts = self.normalizer.count_first_letters(segment)
+            word_count = sum(letter_counts.values())  # Total words with valid first letters
             
-            # Also check if segment has very few lines (likely annotation)
-            lines = [line.strip() for line in segment.split('\n') if line.strip()]
-            line_count = len(lines)
-            
-            # Filter criteria:
-            # 1. Must have at least min_segment_words words
-            # 2. If it's a single line, it must have at least min_segment_words words
-            #    (to avoid single-line annotations)
+            # Filter criteria: must have at least min_segment_words words with valid first letters
             if word_count >= min_segment_words:
                 filtered_segments.append(segment)
             else:
                 skipped_count += 1
                 if log_callback and skipped_count <= 5:  # Log first few skipped segments
                     preview = segment[:50].replace('\n', ' ') + ('...' if len(segment) > 50 else '')
-                    log_callback(f"  Пропущен короткий сегмент ({word_count} слов): {preview}")
+                    log_callback(f"  Пропущен короткий сегмент ({word_count} валидных слов): {preview}")
 
         if skipped_count > 5 and log_callback:
             log_callback(f"  ... и еще {skipped_count - 5} коротких сегментов пропущено")
