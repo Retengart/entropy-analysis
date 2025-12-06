@@ -581,6 +581,7 @@ def author_comparison(options):
             # Import statistical functions
             from entropy_analysis.core.stats import (
                 compare_groups_statistically,
+                correct_multiple_comparisons,
             )
 
             # Extract metric arrays
@@ -882,17 +883,52 @@ def author_comparison(options):
                 effects_list.append(comp_letter_trigram.effect_size.effect_magnitude.title())
                 significant_list.append("✅ Да" if comp_letter_trigram.permutation_test.is_significant else "⚪ Нет")
 
+            # Apply multiple comparison correction
+            p_values_raw = [
+                comp_h.permutation_test.p_value,
+                comp_perp.permutation_test.p_value,
+                comp_even.permutation_test.p_value,
+            ]
+            if len(letter_bigram1) > 0 and len(letter_bigram2) > 0:
+                p_values_raw.append(comp_letter_bigram.permutation_test.p_value)
+            if len(letter_trigram1) > 0 and len(letter_trigram2) > 0:
+                p_values_raw.append(comp_letter_trigram.permutation_test.p_value)
+            
+            # Apply FDR correction (Benjamini-Hochberg)
+            correction = correct_multiple_comparisons(p_values_raw, method="fdr_bh", alpha=0.05)
+            
+            # Update p-values list with corrected values
+            pvalues_corrected = correction.corrected_p_values[:len(pvalues_list)]
+            pvalues_corrected_str = [f"{p:.4f}" for p in pvalues_corrected]
+            
+            # Add corrected significance column
+            significant_corrected_list = [
+                "✅ Да" if p < 0.05 else "⚪ Нет" for p in pvalues_corrected
+            ]
+            
             summary_data = {
                 "Метрика": metrics_list,
                 "Различие": differences_list,
-                "p-value": pvalues_list,
+                "p-value (raw)": pvalues_list,
+                "p-value (FDR corrected)": pvalues_corrected_str,
                 "Cohen's d": cohens_d_list,
                 "Эффект": effects_list,
-                "Значимо?": significant_list,
+                "Значимо? (raw)": significant_list,
+                "Значимо? (corrected)": significant_corrected_list,
             }
 
             df_summary = pl.DataFrame(summary_data)
             st.dataframe(df_summary, use_container_width=True, hide_index=True)
+            
+            # Show correction info
+            st.info(f"""
+            **Коррекция множественных сравнений (FDR-BH):**
+            - Выполнено тестов: {correction.n_tests}
+            - Значимых до коррекции: {correction.n_significant_original}
+            - Значимых после коррекции: {correction.n_significant_corrected}
+            
+            ⚠️ **Важно:** При множественных сравнениях используйте скорректированные p-values для достоверных выводов.
+            """)
 
             st.divider()
 

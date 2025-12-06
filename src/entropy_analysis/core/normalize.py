@@ -28,6 +28,70 @@ RUS33_LETTERS = "абвгдеёжзийклмнопрстуфхцчшщъыьэ�
 # Unicode regex for Cyrillic words
 WORD_PATTERN = re.compile(r"(?ui)[а-яё]+")
 
+# Patterns to detect brackets inside words
+# Square brackets: "пти[чек]" -> "птичек"
+BRACKETS_SQUARE_INSIDE_WORD = re.compile(r"([а-яё]+)\[([а-яё]+)\]([а-яё]*)", re.IGNORECASE)
+# Angle brackets: "М<артынов>" -> "Мартынов"
+BRACKETS_ANGLE_INSIDE_WORD = re.compile(r"([а-яё]+)<([а-яё]+)>([а-яё]*)", re.IGNORECASE)
+
+
+def preprocess_text_for_brackets(text: str) -> str:
+    """
+    Preprocess text to handle brackets inside words.
+    
+    Removes brackets that split words (e.g., "пти[чек]" -> "птичек", "М<артынов>" -> "Мартынов"),
+    but preserves brackets around complete words/phrases (e.g., "[Скоро странствию]" remains).
+    
+    This prevents words from being incorrectly split by OCR errors or editorial marks
+    that appear inside words. The pattern requires letters BEFORE brackets to ensure
+    we only process brackets that are inside words, not around complete words.
+    
+    Examples:
+        "пти[чек]" -> "птичек" (brackets removed, word merged)
+        "[Скоро странствию]" -> "[Скоро странствию]" (preserved, no letters before brackets)
+        "М<артынов>" -> "Мартынов" (angle brackets removed)
+        "т[е][к]ст" -> "текст" (multiple brackets processed sequentially)
+    
+    Args:
+        text: Input text
+        
+    Returns:
+        Preprocessed text with brackets inside words removed
+    """
+    if not text:
+        return text
+    
+    def merge_bracketed_part(match):
+        """Merge bracketed part into word."""
+        before = match.group(1)
+        inside = match.group(2)
+        after = match.group(3) or ""
+        # Merge: before + inside + after
+        return before + inside + after
+    
+    # Remove square brackets inside words (between letters)
+    # Pattern: letters[letters]letters -> letterslettersletters
+    # Requires at least one letter before brackets to ensure it's inside a word
+    text = BRACKETS_SQUARE_INSIDE_WORD.sub(merge_bracketed_part, text)
+    
+    # Remove angle brackets inside words (between letters)
+    # Pattern: letters<letters>letters -> letterslettersletters
+    text = BRACKETS_ANGLE_INSIDE_WORD.sub(merge_bracketed_part, text)
+    
+    # Process multiple brackets sequentially (e.g., "т[е][к]ст" -> "текст")
+    # Keep applying until no more matches (handles nested/cascading brackets)
+    max_iterations = 10  # Safety limit to prevent infinite loops
+    iteration = 0
+    while iteration < max_iterations:
+        original_text = text
+        text = BRACKETS_SQUARE_INSIDE_WORD.sub(merge_bracketed_part, text)
+        text = BRACKETS_ANGLE_INSIDE_WORD.sub(merge_bracketed_part, text)
+        if text == original_text:
+            break  # No more changes
+        iteration += 1
+    
+    return text
+
 
 @dataclass
 class NormalizationConfig:
@@ -95,8 +159,24 @@ class Normalizer:
         Normalize a single character according to the rules.
 
         Returns None if the character should be skipped.
+        
+        Args:
+            ch: Single character to normalize
+            
+        Returns:
+            Normalized character or None if should be skipped
         """
-        ch = ch.lower()
+        if ch is None:
+            return None
+        
+        if not isinstance(ch, str):
+            return None
+        
+        if len(ch) == 0:
+            return None
+        
+        # Take only first character if multiple provided
+        ch = ch[0].lower()
 
         # Apply replacements for rus29 mode
         if self.config.alphabet == Alphabet.RUS29:
@@ -114,7 +194,16 @@ class Normalizer:
         Extract and normalize first letters of words from text.
 
         Yields normalized first letters that pass validation.
+        
+        Args:
+            text: Input text to extract letters from
         """
+        if text is None or not isinstance(text, str):
+            return
+        
+        # Preprocess to handle brackets inside words
+        text = preprocess_text_for_brackets(text)
+        
         for match in WORD_PATTERN.finditer(text):
             token = match.group()
             if len(token) < self.config.min_token_len:
@@ -133,7 +222,16 @@ class Normalizer:
         at the letter level, providing deeper insight into text structure.
 
         Yields normalized letters that pass validation.
+        
+        Args:
+            text: Input text to extract letters from
         """
+        if text is None or not isinstance(text, str):
+            return
+        
+        # Preprocess to handle brackets inside words
+        text = preprocess_text_for_brackets(text)
+        
         for match in WORD_PATTERN.finditer(text):
             token = match.group()
             if len(token) < self.config.min_token_len:
@@ -150,7 +248,16 @@ class Normalizer:
         Tokenize text into words.
 
         Returns list of lowercase tokens that start with valid alphabet letters.
+        
+        Args:
+            text: Input text to tokenize
         """
+        if text is None or not isinstance(text, str):
+            return []
+        
+        # Preprocess to handle brackets inside words
+        text = preprocess_text_for_brackets(text)
+        
         tokens: list[str] = []
         for match in WORD_PATTERN.finditer(text):
             token = match.group().lower()
@@ -172,6 +279,17 @@ class Normalizer:
         """
         counts: dict[str, int] = {}
         for letter in self.extract_first_letters(text):
+            counts[letter] = counts.get(letter, 0) + 1
+        return counts
+
+    def count_letters(self, text: str) -> dict[str, int]:
+        """
+        Count occurrences of all letters in text (not только первых).
+
+        Используется как основной способ оценки распределения символов для метрик энтропии.
+        """
+        counts: dict[str, int] = {}
+        for letter in self.extract_all_letters(text):
             counts[letter] = counts.get(letter, 0) + 1
         return counts
 

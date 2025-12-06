@@ -32,6 +32,9 @@ dependencies = [
     "aiofiles>=23.2.0",
     "typer>=0.9.0",
     "rich>=13.7.0",
+    "lexicalrichness>=0.5.0",
+    "pybursts>=0.1.0",
+    "bursty-dynamics>=0.1.0",
 ]
 
 [project.optional-dependencies]

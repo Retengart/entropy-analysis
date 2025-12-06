@@ -276,6 +276,12 @@ def render_advanced_metrics(result, key_suffix: str = ""):
                         f"{result.mtld:.2f}",
                         help="Measure of Textual Lexical Diversity. Выше = богаче лексика (дольше держит разнообразие).",
                     )
+                if result.hdd is not None:
+                    st.metric(
+                        "HD-D",
+                        f"{result.hdd:.3f}",
+                        help="Hypergeometric Distribution Diversity. Устойчив к длине текста.",
+                    )
                 if result.gries_dp:
                     st.metric(
                         "Gries' DP (norm)",
@@ -294,7 +300,26 @@ def render_advanced_metrics(result, key_suffix: str = ""):
                     st.metric(
                         "Burstiness (B)",
                         f"{result.burstiness:.4f}",
-                        help="Взрывность слов. >0 = слова скапливаются, <0 = регулярное повторение.",
+                        help="Взрывность слов (базовая метрика). >0 = слова скапливаются, <0 = регулярное повторение.",
+                    )
+                if result.kleinberg_bursts is not None:
+                    st.metric(
+                        "Kleinberg Bursts",
+                        f"{result.kleinberg_bursts}",
+                        delta=f"{result.kleinberg_burst_ratio * 100:.1f}% ratio" if result.kleinberg_burst_ratio else None,
+                        help="Количество всплесков по алгоритму Клейнберга. Показывает периоды повышенной активности слов.",
+                    )
+                if result.burstiness_parameter is not None:
+                    st.metric(
+                        "Burstiness Parameter (BP)",
+                        f"{result.burstiness_parameter:.4f}",
+                        help="Параметр взрывности из bursty_dynamics. Отклонение от экспоненциального распределения.",
+                    )
+                if result.memory_coefficient is not None:
+                    st.metric(
+                        "Memory Coefficient (MC)",
+                        f"{result.memory_coefficient:.4f}",
+                        help="Коэффициент памяти. Корреляция между соседними интервалами. Показывает предсказуемость паттернов.",
                     )
                 if result.pierrehumbert_beta:
                     st.metric(
@@ -331,6 +356,82 @@ def render_advanced_metrics(result, key_suffix: str = ""):
                         )
                         st.caption("Тройки букв: 'при', 'рив', 'иве', 'вет'...")
             
+            # Syllable Entropy Section (Russian-specific)
+            if result.syllable_entropy is not None:
+                st.divider()
+                st.markdown("**🔊 Энтропия по слогам (русский)**")
+                st.caption("Анализ слоговой структуры — специфичная метрика для русского языка")
+                
+                syl = result.syllable_entropy
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric(
+                        "H распределения слогов",
+                        f"{syl.syllable_count_entropy:.3f} бит",
+                        help="Энтропия распределения количества слогов в словах. "
+                             "Показывает разнообразие длин слов (в слогах).",
+                    )
+                    st.metric(
+                        "Всего слогов",
+                        f"{syl.total_syllables:,}",
+                        help="Общее количество слогов в тексте",
+                    )
+                
+                with col2:
+                    st.metric(
+                        "H условная (слоги)",
+                        f"{syl.syllable_count_conditional:.3f} бит",
+                        help="Насколько предсказуемо количество слогов следующего слова "
+                             "по количеству слогов предыдущего. Ниже = более предсказуемый ритм.",
+                    )
+                    st.metric(
+                        "Сред. слогов/слово",
+                        f"{syl.avg_syllables_per_word:.2f}",
+                        help="Среднее количество слогов на слово",
+                    )
+                
+                with col3:
+                    st.metric(
+                        "H гласных паттернов",
+                        f"{syl.vowel_pattern_entropy:.3f} бит",
+                        help="Энтропия паттернов гласных внутри слов (например, 'ие' в 'привет'). "
+                             "Уникальная метрика морфологического разнообразия.",
+                    )
+                    st.metric(
+                        "Уникальных паттернов",
+                        f"{syl.unique_patterns:,}",
+                        help="Количество различных паттернов гласных",
+                    )
+                
+                # Distribution visualization
+                with st.expander("📊 Распределение слогов по словам", expanded=False):
+                    # Sort by syllable count
+                    sorted_dist = dict(sorted(syl.syllable_count_distribution.items()))
+                    
+                    fig = go.Figure(data=[
+                        go.Bar(
+                            x=list(sorted_dist.keys()),
+                            y=list(sorted_dist.values()),
+                            marker_color='#2E86AB',
+                            text=[f"{v:,}" for v in sorted_dist.values()],
+                            textposition='outside',
+                        )
+                    ])
+                    
+                    fig.update_layout(
+                        title="Распределение слов по количеству слогов",
+                        xaxis_title="Количество слогов",
+                        yaxis_title="Количество слов",
+                        height=300,
+                        showlegend=False,
+                        paper_bgcolor="white",
+                        plot_bgcolor="white",
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True, key=f"syllable_dist_{key_suffix}_{id(result)}")
+
             # Readability Indices Section
             if result.flesch_reading_ease is not None or result.gunning_fog_index is not None:
                 st.divider()

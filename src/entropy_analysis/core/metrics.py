@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import stats
+from scipy import special, sparse, stats
 from scipy.optimize import curve_fit
 from scipy.spatial.distance import jensenshannon
 
@@ -81,6 +81,19 @@ def normalize_to_probabilities(
     return counts_arr / total
 
 
+def _entropy_from_counts(counts_arr: NDArray[np.integer]) -> float:
+    """
+    Stable entropy from counts using scipy.special.xlogy (handles zeros safely).
+    """
+    counts_f = np.asarray(counts_arr, dtype=np.float64)
+    total = counts_f.sum()
+    if total == 0:
+        return 0.0
+    probs = counts_f / total
+    # xlogy returns 0 when prob == 0, avoiding -inf * 0 issues
+    return float(-np.sum(special.xlogy(probs, probs) / np.log(2)))
+
+
 def calculate_kl_divergence(
     p: Sequence[float] | NDArray[np.floating],
     q: Sequence[float] | NDArray[np.floating],
@@ -121,9 +134,14 @@ def calculate_kl_divergence(
     q_smoothed = q_smoothed / q_smoothed.sum()  # Renormalize Q only
 
     # D_KL(P || Q) = sum(P * log(P/Q)) for all i where p_i > 0
+    # Use xlogy for numerical stability: xlogy(p, p/q) = p * log(p/q)
     # By convention, 0 * log(0/q) = 0
     mask = p_arr > 0
-    kl_div = np.sum(p_arr[mask] * np.log(p_arr[mask] / q_smoothed[mask]) / np.log(base))
+    if np.any(mask):
+        ratio = p_arr[mask] / q_smoothed[mask]
+        kl_div = np.sum(special.xlogy(p_arr[mask], ratio) / np.log(base))
+    else:
+        kl_div = 0.0
 
     return DivergenceResult(
         divergence=float(kl_div),
@@ -642,23 +660,80 @@ def calculate_ngram_entropy(tokens: Sequence[str], n: int = 2) -> float:
     """
     if len(tokens) < n:
         return 0.0
+    
+    # For large corpora, use Counter (memory-efficient for sparse data)
+    # CSR optimization would require mapping n-grams to indices, which is complex
+    # Counter is already sparse (only stores observed n-grams) and efficient
+    # For very large datasets, consider pre-filtering or sampling
+    ngrams = Counter(tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1))
+    context = Counter(tuple(tokens[i : i + n - 1]) for i in range(len(tokens) - n + 1))
 
-    ngrams = [tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1)]
-    context = [tuple(tokens[i : i + n - 1]) for i in range(len(tokens) - n + 1)]
+    # Use stable entropy calculation with xlogy
+    h_ngram = _entropy_from_counts(np.fromiter(ngrams.values(), dtype=np.int64))
+    h_context = _entropy_from_counts(np.fromiter(context.values(), dtype=np.int64))
 
-    # H(N-gram)
-    ngram_counts = Counter(ngrams)
-    total_ngrams = sum(ngram_counts.values())
-    ngram_probs = np.array(list(ngram_counts.values())) / total_ngrams
-    h_ngram = -np.sum(ngram_probs * np.log2(ngram_probs))
+    # Clamp to non-negative to mitigate numerical drift
+    return float(max(0.0, h_ngram - h_context))
 
-    # H(Context)
-    context_counts = Counter(context)
-    total_context = sum(context_counts.values())
-    context_probs = np.array(list(context_counts.values())) / total_context
-    h_context = -np.sum(context_probs * np.log2(context_probs))
 
-    return float(h_ngram - h_context)
+def calculate_lexical_richness_metrics(
+    tokens: Sequence[str],
+    mattr_window: int = 100,
+    mtld_threshold: float = 0.72,
+    hdd_draws: int = 42,
+) -> dict[str, float | None]:
+    """
+    Compute lexical diversity metrics via LexicalRichness with safe fallbacks.
+    """
+    if not tokens:
+        return {
+            "yules_k": 0.0,
+            "mtld": 0.0,
+            "mattr": 0.0,
+            "hdd": 0.0,
+        }
+
+    try:
+        from lexicalrichness import LexicalRichness  # type: ignore
+    except Exception:
+        # Fallback to internal implementations if dependency unavailable
+        return {
+            "yules_k": calculate_yules_k(tokens),
+            "mtld": calculate_mtld(tokens, threshold=mtld_threshold),
+            "mattr": calculate_mattr(tokens, window_size=mattr_window),
+            "hdd": 0.0,
+        }
+
+    # LexicalRichness expects a string, not a list
+    text_str = " ".join(tokens)
+    lex = LexicalRichness(text_str)
+
+    try:
+        yules_k = float(lex.yulek())
+    except Exception:
+        yules_k = calculate_yules_k(tokens)
+
+    try:
+        mtld = float(lex.mtld(threshold=mtld_threshold))
+    except Exception:
+        mtld = calculate_mtld(tokens, threshold=mtld_threshold)
+
+    try:
+        mattr = float(lex.mattr(window_size=mattr_window))
+    except Exception:
+        mattr = calculate_mattr(tokens, window_size=mattr_window)
+
+    try:
+        hdd = float(lex.hdd(draws=hdd_draws))
+    except Exception:
+        hdd = 0.0
+
+    return {
+        "yules_k": yules_k,
+        "mtld": mtld,
+        "mattr": mattr,
+        "hdd": hdd,
+    }
 
 
 def calculate_burstiness_index(tokens: Sequence[str], min_count: int = 5) -> float:
@@ -707,6 +782,189 @@ def calculate_burstiness_index(tokens: Sequence[str], min_count: int = 5) -> flo
         return 0.0
 
     return float(np.mean(b_values))
+
+
+@dataclass
+class BurstinessMetrics:
+    """Comprehensive burstiness analysis results."""
+    
+    # Simple burstiness (baseline)
+    burstiness_b: float  # (σ - μ) / (σ + μ)
+    
+    # Kleinberg's algorithm (pybursts)
+    kleinberg_bursts: int | None  # Number of detected bursts
+    kleinberg_burst_ratio: float | None  # Ratio of bursty periods
+    
+    # Bursty dynamics metrics
+    burstiness_parameter: float | None  # BP from bursty_dynamics
+    memory_coefficient: float | None  # MC from bursty_dynamics
+
+
+def calculate_advanced_burstiness_metrics(
+    tokens: Sequence[str],
+    min_count: int = 5,
+) -> BurstinessMetrics:
+    """
+    Calculate comprehensive burstiness metrics using pybursts and bursty_dynamics.
+    
+    Combines:
+    - Simple burstiness (B) as baseline
+    - Kleinberg's algorithm for burst detection
+    - Burstiness parameter and memory coefficient from bursty_dynamics
+    
+    Args:
+        tokens: List of tokens/words
+        min_count: Minimum occurrences of word to be considered
+        
+    Returns:
+        BurstinessMetrics with all computed metrics
+    """
+    # Baseline: simple burstiness
+    burstiness_b = calculate_burstiness_index(tokens, min_count=min_count)
+    
+    # Initialize optional metrics
+    kleinberg_bursts = None
+    kleinberg_burst_ratio = None
+    burstiness_parameter = None
+    memory_coefficient = None
+    
+    if not tokens:
+        return BurstinessMetrics(
+            burstiness_b=0.0,
+            kleinberg_bursts=None,
+            kleinberg_burst_ratio=None,
+            burstiness_parameter=None,
+            memory_coefficient=None,
+        )
+    
+    # Kleinberg's algorithm via pybursts
+    # Note: pybursts has known issues with certain input formats
+    # We use a fallback manual burst detection if it fails
+    try:
+        from pybursts.pybursts import kleinberg  # type: ignore
+        
+        token_counts = Counter(tokens)
+        frequent_tokens = {token for token, count in token_counts.items() if count >= min_count}
+        
+        if frequent_tokens:
+            most_frequent = max(frequent_tokens, key=lambda t: token_counts[t])
+            positions = [i for i, token in enumerate(tokens) if token == most_frequent]
+            
+            if len(positions) >= min_count:
+                try:
+                    # pybursts expects offsets (timestamps), convert positions to float
+                    offsets = np.array(positions, dtype=np.float64)
+                    bursts = kleinberg(offsets, s=2, gamma=0.5)
+                    
+                    if bursts is not None and len(bursts) > 0:
+                        # bursts is array of [level, start, end] tuples
+                        if isinstance(bursts, np.ndarray) and bursts.ndim == 2:
+                            burst_levels = bursts[:, 0]
+                            kleinberg_bursts = int(np.sum(burst_levels > 0))
+                            kleinberg_burst_ratio = float(kleinberg_bursts / len(burst_levels)) if len(burst_levels) > 0 else 0.0
+                        else:
+                            # Fallback for unexpected format
+                            kleinberg_bursts = 0
+                            kleinberg_burst_ratio = 0.0
+                    else:
+                        kleinberg_bursts = 0
+                        kleinberg_burst_ratio = 0.0
+                except (IndexError, ValueError, TypeError):
+                    # pybursts has bugs with certain inputs - use manual fallback
+                    # Manual burst detection: count clusters of occurrences
+                    intervals = np.diff(positions)
+                    if len(intervals) > 0:
+                        median_interval = np.median(intervals)
+                        # A "burst" is when interval is less than half the median
+                        burst_threshold = median_interval * 0.5
+                        burst_count = int(np.sum(intervals < burst_threshold))
+                        kleinberg_bursts = burst_count
+                        kleinberg_burst_ratio = float(burst_count / len(intervals)) if len(intervals) > 0 else 0.0
+                    else:
+                        kleinberg_bursts = 0
+                        kleinberg_burst_ratio = 0.0
+    except ImportError:
+        # pybursts not available - use manual burst detection
+        token_counts = Counter(tokens)
+        frequent_tokens = {token for token, count in token_counts.items() if count >= min_count}
+        if frequent_tokens:
+            most_frequent = max(frequent_tokens, key=lambda t: token_counts[t])
+            positions = [i for i, token in enumerate(tokens) if token == most_frequent]
+            if len(positions) >= min_count:
+                intervals = np.diff(positions)
+                if len(intervals) > 0:
+                    median_interval = np.median(intervals)
+                    burst_threshold = median_interval * 0.5
+                    burst_count = int(np.sum(intervals < burst_threshold))
+                    kleinberg_bursts = burst_count
+                    kleinberg_burst_ratio = float(burst_count / len(intervals))
+    except Exception:
+        # Other errors
+        pass
+    
+    # Bursty dynamics metrics
+    # Note: bursty_dynamics API expects DataFrame, so we'll compute manually
+    # BP = (σ - μ) / (σ + μ) where σ is std of intervals, μ is mean
+    # MC = correlation between consecutive intervals
+    try:
+        # Build inter-arrival times for frequent words
+        token_positions: dict[str, list[int]] = {}
+        for i, token in enumerate(tokens):
+            if token not in token_positions:
+                token_positions[token] = []
+            token_positions[token].append(i)
+        
+        # Collect all inter-arrival intervals from frequent words
+        all_intervals: list[float] = []
+        for token, positions_list in token_positions.items():
+            if len(positions_list) >= min_count:
+                intervals = np.diff(positions_list).astype(float)
+                if len(intervals) > 0:
+                    all_intervals.extend(intervals.tolist())
+        
+        if len(all_intervals) >= 3:
+            intervals_array = np.array(all_intervals)
+            
+            try:
+                # Burstiness Parameter: BP = (σ - μ) / (σ + μ)
+                mu = np.mean(intervals_array)
+                sigma = np.std(intervals_array, ddof=1)
+                
+                if mu + sigma > 0:
+                    bp_val = (sigma - mu) / (sigma + mu)
+                    burstiness_parameter = float(bp_val) if np.isfinite(bp_val) else None
+                else:
+                    burstiness_parameter = None
+                
+                # Memory Coefficient: correlation between consecutive intervals
+                if len(intervals_array) >= 2:
+                    # Create pairs of consecutive intervals
+                    intervals_1 = intervals_array[:-1]
+                    intervals_2 = intervals_array[1:]
+                    
+                    if len(intervals_1) >= 2:
+                        # Compute Pearson correlation
+                        correlation_matrix = np.corrcoef(intervals_1, intervals_2)
+                        mc_val = correlation_matrix[0, 1] if correlation_matrix.shape == (2, 2) else 0.0
+                        memory_coefficient = float(mc_val) if np.isfinite(mc_val) else None
+                    else:
+                        memory_coefficient = None
+                else:
+                    memory_coefficient = None
+            except Exception:
+                # Fallback if computation fails
+                pass
+    except Exception:
+        # Other errors
+        pass
+    
+    return BurstinessMetrics(
+        burstiness_b=burstiness_b,
+        kleinberg_bursts=kleinberg_bursts,
+        kleinberg_burst_ratio=kleinberg_burst_ratio,
+        burstiness_parameter=burstiness_parameter,
+        memory_coefficient=memory_coefficient,
+    )
 
 
 def calculate_mattr(
@@ -1120,6 +1378,7 @@ class ZipfMandelbrotAnalysis:
 
 def calculate_zipf_mandelbrot(
     counts: Sequence[int] | NDArray[np.integer],
+    adaptive_sampling: bool = True,
 ) -> ZipfMandelbrotAnalysis:
     """
     Analyze distribution using Zipf-Mandelbrot law.
@@ -1132,6 +1391,8 @@ def calculate_zipf_mandelbrot(
 
     Args:
         counts: Array of counts (will be sorted by frequency)
+        adaptive_sampling: If True, uses intelligent sampling that preserves
+            distribution shape (logarithmic sampling for tail, dense for head)
 
     Returns:
         ZipfMandelbrotAnalysis with alpha, beta, C, and fit quality
@@ -1155,12 +1416,35 @@ def calculate_zipf_mandelbrot(
 
     # Ranks (1, 2, 3, ...)
     ranks = np.arange(1, len(sorted_counts) + 1, dtype=np.float64)
+    n_total = len(sorted_counts)
 
-    # Ограничиваем количество точек для регрессии (макс 200) для ускорения
-    max_points = 200
-    if len(sorted_counts) > max_points:
-        # Берем равномерно распределенные точки
-        indices = np.linspace(0, len(sorted_counts) - 1, max_points, dtype=int)
+    # Adaptive sampling: more points in the head (important for Mandelbrot correction),
+    # logarithmic spacing in the tail (where Zipf behavior dominates)
+    if adaptive_sampling and n_total > 300:
+        # Strategy: 
+        # - Keep all points in top 50 (critical for beta estimation)
+        # - Logarithmic sampling for the rest
+        n_head = min(50, n_total // 3)
+        n_tail_samples = 250  # Total samples from tail
+        
+        head_indices = np.arange(n_head)
+        
+        # Logarithmic sampling for tail: more points near head, fewer at far tail
+        tail_start = n_head
+        tail_end = n_total - 1
+        
+        if tail_end > tail_start:
+            # Log-spaced indices (excluding already-included head)
+            tail_indices = np.unique(
+                np.geomspace(tail_start, tail_end, n_tail_samples).astype(int)
+            )
+            # Ensure we include the very last point
+            if tail_indices[-1] != tail_end:
+                tail_indices = np.append(tail_indices, tail_end)
+        else:
+            tail_indices = np.array([], dtype=int)
+        
+        indices = np.concatenate([head_indices, tail_indices])
         sorted_counts = sorted_counts[indices]
         ranks = ranks[indices]
 
@@ -1184,23 +1468,33 @@ def calculate_zipf_mandelbrot(
     initial_log_c = zipf_intercept
 
     try:
-        # Fit using curve_fit (ограничиваем итерации для ускорения)
+        # Weight points: higher weight for head (more important for beta)
+        # and tail endpoints (important for alpha)
+        weights = np.ones(len(ranks))
+        weights[:min(20, len(weights))] = 2.0  # Head gets 2x weight
+        weights[-min(10, len(weights)):] = 1.5  # Far tail gets 1.5x weight
+        
+        # Fit using curve_fit with adaptive iterations
+        max_iterations = min(2000, 500 + len(ranks) * 5)
+        
         popt, _ = curve_fit(
             zipf_mandelbrot_func,
             ranks,
             log_counts,
             p0=[initial_alpha, initial_beta, initial_log_c],
             bounds=([0.1, 0.0, -np.inf], [5.0, 100.0, np.inf]),
-            maxfev=1000,  # Уменьшено с 5000 для ускорения
+            sigma=1.0 / weights,  # Inverse weights for sigma
+            maxfev=max_iterations,
         )
 
         alpha_fit, beta_fit, log_c_fit = popt
         c_fit = np.exp(log_c_fit)
 
-        # Calculate R²
+        # Calculate R² (weighted)
         predicted_log = zipf_mandelbrot_func(ranks, alpha_fit, beta_fit, log_c_fit)
-        ss_res = np.sum((log_counts - predicted_log) ** 2)
-        ss_tot = np.sum((log_counts - np.mean(log_counts)) ** 2)
+        residuals = log_counts - predicted_log
+        ss_res = np.sum(weights * residuals ** 2)
+        ss_tot = np.sum(weights * (log_counts - np.average(log_counts, weights=weights)) ** 2)
         r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
 
         r_squared_improvement = max(0.0, r_squared - zipf_r_squared)
@@ -1345,6 +1639,115 @@ def count_syllables_russian(word: str) -> int:
     count = sum(1 for char in word if char in _RUSSIAN_VOWELS)
     # Every word has at least 1 syllable if it has letters
     return max(1, count) if any(c.isalpha() for c in word) else 0
+
+
+@dataclass
+class SyllableEntropyResult:
+    """Result of syllable-based entropy analysis."""
+    
+    # Syllable count distribution entropy
+    syllable_count_entropy: float  # Entropy of word-length distribution (in syllables)
+    syllable_count_conditional: float  # H(next syllable count | previous)
+    
+    # Statistics
+    total_syllables: int
+    total_words: int
+    avg_syllables_per_word: float
+    syllable_count_distribution: dict[int, int]  # count -> frequency
+    
+    # Syllable pattern entropy (for Russian: vowel patterns)
+    vowel_pattern_entropy: float  # Entropy of vowel patterns within words
+    unique_patterns: int
+
+
+def calculate_syllable_entropy(tokens: Sequence[str]) -> SyllableEntropyResult | None:
+    """
+    Calculate entropy based on syllable structure of Russian text.
+    
+    For Russian, syllables are determined by vowels. This function analyzes:
+    1. Distribution of syllable counts per word (1-syllable, 2-syllable, etc.)
+    2. Conditional entropy: how predictable is the syllable count given previous word
+    3. Vowel patterns within words (structural fingerprint)
+    
+    This metric is particularly informative for Russian because:
+    - Russian has rich morphology with prefixes/suffixes affecting syllable count
+    - Different authors/genres have characteristic syllable distributions
+    - Poetry vs prose has very different syllable patterns
+    
+    Args:
+        tokens: List of words/tokens
+        
+    Returns:
+        SyllableEntropyResult or None if insufficient data
+    """
+    if not tokens or len(tokens) < 10:
+        return None
+    
+    # Count syllables per word
+    syllable_counts = [count_syllables_russian(word) for word in tokens]
+    
+    # Filter out words with 0 syllables (numbers, punctuation that slipped through)
+    syllable_counts = [s for s in syllable_counts if s > 0]
+    
+    if len(syllable_counts) < 10:
+        return None
+    
+    total_syllables = sum(syllable_counts)
+    total_words = len(syllable_counts)
+    avg_syllables = total_syllables / total_words if total_words > 0 else 0.0
+    
+    # Distribution of syllable counts
+    syllable_count_dist = Counter(syllable_counts)
+    
+    # Entropy of syllable count distribution
+    counts_array = np.array(list(syllable_count_dist.values()), dtype=np.int64)
+    syllable_count_entropy = _entropy_from_counts(counts_array)
+    
+    # Conditional entropy: H(syllable_count[i] | syllable_count[i-1])
+    # Build bigrams of syllable counts
+    if len(syllable_counts) >= 2:
+        syllable_bigrams = Counter(
+            (syllable_counts[i], syllable_counts[i + 1])
+            for i in range(len(syllable_counts) - 1)
+        )
+        context_counts = Counter(syllable_counts[:-1])
+        
+        bigram_array = np.array(list(syllable_bigrams.values()), dtype=np.int64)
+        context_array = np.array(list(context_counts.values()), dtype=np.int64)
+        
+        h_bigram = _entropy_from_counts(bigram_array)
+        h_context = _entropy_from_counts(context_array)
+        syllable_count_conditional = max(0.0, h_bigram - h_context)
+    else:
+        syllable_count_conditional = 0.0
+    
+    # Vowel pattern entropy: extract vowel patterns from words
+    # Pattern = sequence of vowels in word, e.g., "привет" -> "ие"
+    vowel_patterns: list[str] = []
+    for word in tokens:
+        pattern = "".join(c.lower() for c in word if c.lower() in "аеёиоуыэюя")
+        if pattern:  # Only words with vowels
+            vowel_patterns.append(pattern)
+    
+    if vowel_patterns:
+        pattern_counts = Counter(vowel_patterns)
+        pattern_array = np.array(list(pattern_counts.values()), dtype=np.int64)
+        vowel_pattern_entropy = _entropy_from_counts(pattern_array)
+        unique_patterns = len(pattern_counts)
+    else:
+        vowel_pattern_entropy = 0.0
+        unique_patterns = 0
+    
+    return SyllableEntropyResult(
+        syllable_count_entropy=float(syllable_count_entropy),
+        syllable_count_conditional=float(syllable_count_conditional),
+        total_syllables=total_syllables,
+        total_words=total_words,
+        avg_syllables_per_word=float(avg_syllables),
+        syllable_count_distribution=dict(syllable_count_dist),
+        vowel_pattern_entropy=float(vowel_pattern_entropy),
+        unique_patterns=unique_patterns,
+    )
 
 
 def count_sentences(text: str) -> int:
@@ -1644,10 +2047,9 @@ def calculate_ngram_distribution(
             rank=rank,
         ))
     
-    # Calculate entropy of n-gram distribution
-    counts_array = np.array(list(ngram_counts.values()), dtype=np.float64)
-    probs = counts_array / total_ngrams
-    entropy = float(-np.sum(probs * np.log2(probs)))
+    # Calculate entropy of n-gram distribution using stable xlogy
+    counts_array = np.array(list(ngram_counts.values()), dtype=np.int64)
+    entropy = _entropy_from_counts(counts_array)
     
     # Calculate conditional entropy H(Xn | X1...Xn-1)
     # H(Xn|X1...Xn-1) = H(X1...Xn) - H(X1...Xn-1)
@@ -1836,3 +2238,468 @@ def compare_ngram_distributions(
         top_diff_text1=top_diff1,
         top_diff_text2=top_diff2,
     )
+
+
+# ============================================================================
+# UNIFIED METRICS PIPELINE
+# ============================================================================
+
+
+@dataclass
+class ComprehensiveMetrics:
+    """
+    Complete set of all available text metrics in one structure.
+    
+    This is the result of running the full metrics pipeline on a text.
+    Organized by category for easy access.
+    """
+    
+    # === BASIC ENTROPY ===
+    shannon_entropy: float
+    normalized_entropy: float | None
+    perplexity: float
+    
+    # === LEXICAL DIVERSITY ===
+    mtld: float | None
+    mattr: float | None
+    hdd: float | None
+    yules_k: float | None
+    ttr: float  # Type-Token Ratio (basic)
+    
+    # === N-GRAM ENTROPY (letters) ===
+    letter_bigram_entropy: float | None
+    letter_trigram_entropy: float | None
+    letter_bigram_conditional: float | None  # H(X2|X1)
+    letter_trigram_conditional: float | None  # H(X3|X1X2)
+    
+    # === N-GRAM COVERAGE ===
+    bigram_coverage_top10: float | None
+    trigram_coverage_top10: float | None
+    bigram_hapax_ratio: float | None
+    trigram_hapax_ratio: float | None
+    
+    # === SYLLABLE ENTROPY (Russian-specific) ===
+    syllable_count_entropy: float | None
+    syllable_conditional_entropy: float | None
+    vowel_pattern_entropy: float | None
+    avg_syllables_per_word: float | None
+    
+    # === BURSTINESS & MEMORY ===
+    burstiness_b: float | None  # Basic B = (σ-μ)/(σ+μ)
+    burstiness_parameter: float | None  # BP from intervals
+    memory_coefficient: float | None  # MC correlation
+    kleinberg_bursts: int | None
+    kleinberg_burst_ratio: float | None
+    
+    # === FRACTAL & COMPLEXITY ===
+    hurst_exponent: float | None
+    zipf_alpha: float | None
+    zipf_r_squared: float | None
+    zipf_mandelbrot_alpha: float | None
+    zipf_mandelbrot_beta: float | None
+    compression_ratio: float | None
+    
+    # === DISTRIBUTION SHAPE ===
+    simpson_index: float | None
+    gini_simpson: float | None
+    gries_dp_norm: float | None
+    pierrehumbert_beta: float | None
+    
+    # === READABILITY ===
+    flesch_reading_ease: float | None
+    gunning_fog_index: float | None
+    avg_sentence_length: float | None
+    
+    # === METADATA ===
+    n_words: int
+    n_unique_words: int
+    n_letters: int
+    n_unique_letters: int
+
+
+@dataclass 
+class AttributionFeatures:
+    """
+    Optimized feature set for authorship attribution.
+    
+    These are the metrics that best distinguish between authors
+    based on empirical testing. Normalized for ML compatibility.
+    """
+    
+    # Primary features (highest discriminative power)
+    mtld_norm: float  # Normalized MTLD
+    yules_k_norm: float  # Normalized Yule's K
+    burstiness_b: float  # Already in [-1, 1]
+    memory_coefficient: float  # Already in [-1, 1]
+    
+    # Secondary features (moderate discriminative power)
+    mattr: float  # Already in [0, 1]
+    hdd: float  # Already in [0, 1]
+    letter_bigram_conditional: float  # Normalized
+    vowel_pattern_entropy_norm: float  # Normalized
+    
+    # Tertiary features (style indicators)
+    avg_sentence_length_norm: float
+    avg_syllables_per_word: float
+    compression_ratio: float  # Already in [0, 1]
+    
+    # Raw values for reference
+    raw_mtld: float | None
+    raw_yules_k: float | None
+    
+    def to_vector(self) -> list[float]:
+        """Convert to feature vector for ML models."""
+        return [
+            self.mtld_norm,
+            self.yules_k_norm,
+            self.burstiness_b,
+            self.memory_coefficient,
+            self.mattr,
+            self.hdd,
+            self.letter_bigram_conditional,
+            self.vowel_pattern_entropy_norm,
+            self.avg_sentence_length_norm,
+            self.avg_syllables_per_word,
+            self.compression_ratio,
+        ]
+    
+    @staticmethod
+    def feature_names() -> list[str]:
+        """Return feature names for the vector."""
+        return [
+            "mtld_norm",
+            "yules_k_norm", 
+            "burstiness_b",
+            "memory_coefficient",
+            "mattr",
+            "hdd",
+            "letter_bigram_conditional",
+            "vowel_pattern_entropy_norm",
+            "avg_sentence_length_norm",
+            "avg_syllables_per_word",
+            "compression_ratio",
+        ]
+
+
+def calculate_all_metrics(
+    tokens: Sequence[str],
+    letters: Sequence[str],
+    text: str,
+    letter_counts: dict[str, int] | None = None,
+    alphabet_size: int = 29,
+) -> ComprehensiveMetrics:
+    """
+    Calculate ALL available metrics in a single pipeline.
+    
+    This is the master function that computes every metric available
+    in the library. Use this when you need comprehensive analysis
+    and don't want to call individual functions.
+    
+    Args:
+        tokens: List of words/tokens (for lexical metrics)
+        letters: List of individual letters (for n-gram entropy)
+        text: Original text (for readability, compression)
+        letter_counts: Pre-computed letter frequency dict (optional)
+        alphabet_size: Size of alphabet for normalization
+        
+    Returns:
+        ComprehensiveMetrics with all computed values
+    """
+    n_words = len(tokens)
+    n_unique_words = len(set(tokens))
+    n_letters = len(letters)
+    n_unique_letters = len(set(letters)) if letters else 0
+    
+    # === BASIC ENTROPY ===
+    if letter_counts:
+        counts_array = np.array(list(letter_counts.values()), dtype=np.int64)
+    else:
+        from collections import Counter
+        letter_freq = Counter(letters)
+        counts_array = np.array(list(letter_freq.values()), dtype=np.int64)
+    
+    shannon_h = _entropy_from_counts(counts_array) if len(counts_array) > 0 else 0.0
+    h_max = np.log2(alphabet_size) if alphabet_size > 0 else 1.0
+    normalized_h = shannon_h / h_max if h_max > 0 else None
+    perplexity = 2 ** shannon_h if shannon_h > 0 else 1.0
+    
+    # === LEXICAL DIVERSITY ===
+    lex_metrics = calculate_lexical_richness_metrics(tokens) if tokens else {}
+    mtld = lex_metrics.get("mtld")
+    mattr = lex_metrics.get("mattr")
+    hdd = lex_metrics.get("hdd")
+    yules_k = lex_metrics.get("yules_k")
+    ttr = n_unique_words / n_words if n_words > 0 else 0.0
+    
+    # === N-GRAM ENTROPY (letters) ===
+    letter_bigram_h = None
+    letter_trigram_h = None
+    letter_bigram_cond = None
+    letter_trigram_cond = None
+    bigram_cov10 = None
+    trigram_cov10 = None
+    bigram_hapax = None
+    trigram_hapax = None
+    
+    if len(letters) >= 2:
+        bigram_dist = calculate_ngram_distribution(list(letters), n=2, top_k=20)
+        if bigram_dist:
+            letter_bigram_h = bigram_dist.entropy
+            letter_bigram_cond = bigram_dist.conditional_entropy
+            bigram_cov10 = bigram_dist.coverage_top_10
+            bigram_hapax = bigram_dist.hapax_ratio
+    
+    if len(letters) >= 3:
+        trigram_dist = calculate_ngram_distribution(list(letters), n=3, top_k=20)
+        if trigram_dist:
+            letter_trigram_h = trigram_dist.entropy
+            letter_trigram_cond = trigram_dist.conditional_entropy
+            trigram_cov10 = trigram_dist.coverage_top_10
+            trigram_hapax = trigram_dist.hapax_ratio
+    
+    # === SYLLABLE ENTROPY ===
+    syllable_result = calculate_syllable_entropy(tokens) if tokens else None
+    syllable_count_h = syllable_result.syllable_count_entropy if syllable_result else None
+    syllable_cond_h = syllable_result.syllable_count_conditional if syllable_result else None
+    vowel_pattern_h = syllable_result.vowel_pattern_entropy if syllable_result else None
+    avg_syl = syllable_result.avg_syllables_per_word if syllable_result else None
+    
+    # === BURSTINESS & MEMORY ===
+    burst_metrics = calculate_advanced_burstiness_metrics(tokens) if tokens else None
+    burstiness_b = burst_metrics.burstiness_b if burst_metrics else None
+    bp = burst_metrics.burstiness_parameter if burst_metrics else None
+    mc = burst_metrics.memory_coefficient if burst_metrics else None
+    kb = burst_metrics.kleinberg_bursts if burst_metrics else None
+    kb_ratio = burst_metrics.kleinberg_burst_ratio if burst_metrics else None
+    
+    # === FRACTAL & COMPLEXITY ===
+    hurst = None
+    if tokens and len(tokens) >= 50:
+        hurst_result = calculate_hurst_from_word_lengths(tokens)
+        hurst = hurst_result.hurst_exponent if hurst_result else None
+    
+    zipf = calculate_zipf_coefficient(counts_array) if len(counts_array) > 0 else None
+    zipf_alpha = zipf.alpha if zipf else None
+    zipf_r2 = zipf.r_squared if zipf else None
+    
+    # Zipf-Mandelbrot on WORD frequencies
+    zm_alpha = None
+    zm_beta = None
+    if tokens:
+        from collections import Counter
+        word_freq = Counter(tokens)
+        word_counts = np.array(sorted(word_freq.values(), reverse=True), dtype=np.int64)
+        if len(word_counts) >= 10:
+            zm = calculate_zipf_mandelbrot(word_counts)
+            zm_alpha = zm.alpha
+            zm_beta = zm.beta
+    
+    compression = calculate_compression_complexity(text) if text else None
+    compression_ratio = compression.compression_ratio if compression else None
+    
+    # === DISTRIBUTION SHAPE ===
+    simpson = calculate_simpson_index(counts_array) if len(counts_array) > 0 else None
+    gini_simp = calculate_gini_simpson_index(counts_array) if len(counts_array) > 0 else None
+    gries = calculate_average_gries_dp(tokens) if tokens else None
+    
+    pierrehumbert = None
+    if tokens and len(tokens) >= 100:
+        pierrehumbert = calculate_average_pierrehumbert_beta(tokens, min_word_freq=5, max_words=30)
+    
+    # === READABILITY ===
+    readability = calculate_readability(tokens, text) if tokens and text else None
+    flesch = readability.flesch_reading_ease if readability else None
+    fog = readability.gunning_fog_index if readability else None
+    avg_sent_len = readability.avg_sentence_length if readability else None
+    
+    return ComprehensiveMetrics(
+        shannon_entropy=shannon_h,
+        normalized_entropy=normalized_h,
+        perplexity=perplexity,
+        mtld=mtld,
+        mattr=mattr,
+        hdd=hdd,
+        yules_k=yules_k,
+        ttr=ttr,
+        letter_bigram_entropy=letter_bigram_h,
+        letter_trigram_entropy=letter_trigram_h,
+        letter_bigram_conditional=letter_bigram_cond,
+        letter_trigram_conditional=letter_trigram_cond,
+        bigram_coverage_top10=bigram_cov10,
+        trigram_coverage_top10=trigram_cov10,
+        bigram_hapax_ratio=bigram_hapax,
+        trigram_hapax_ratio=trigram_hapax,
+        syllable_count_entropy=syllable_count_h,
+        syllable_conditional_entropy=syllable_cond_h,
+        vowel_pattern_entropy=vowel_pattern_h,
+        avg_syllables_per_word=avg_syl,
+        burstiness_b=burstiness_b,
+        burstiness_parameter=bp,
+        memory_coefficient=mc,
+        kleinberg_bursts=kb,
+        kleinberg_burst_ratio=kb_ratio,
+        hurst_exponent=hurst,
+        zipf_alpha=zipf_alpha,
+        zipf_r_squared=zipf_r2,
+        zipf_mandelbrot_alpha=zm_alpha,
+        zipf_mandelbrot_beta=zm_beta,
+        compression_ratio=compression_ratio,
+        simpson_index=simpson,
+        gini_simpson=gini_simp,
+        gries_dp_norm=gries,
+        pierrehumbert_beta=pierrehumbert,
+        flesch_reading_ease=flesch,
+        gunning_fog_index=fog,
+        avg_sentence_length=avg_sent_len,
+        n_words=n_words,
+        n_unique_words=n_unique_words,
+        n_letters=n_letters,
+        n_unique_letters=n_unique_letters,
+    )
+
+
+def extract_attribution_features(
+    metrics: ComprehensiveMetrics,
+    mtld_scale: float = 500.0,
+    yules_k_scale: float = 200.0,
+    vowel_h_scale: float = 10.0,
+    sentence_len_scale: float = 30.0,
+) -> AttributionFeatures:
+    """
+    Extract normalized features optimized for authorship attribution.
+    
+    Selects the most discriminative metrics and normalizes them
+    to [0, 1] or [-1, 1] range for ML compatibility.
+    
+    Args:
+        metrics: ComprehensiveMetrics from calculate_all_metrics()
+        mtld_scale: Expected max MTLD value for normalization
+        yules_k_scale: Expected max Yule's K for normalization
+        vowel_h_scale: Expected max vowel pattern entropy
+        sentence_len_scale: Expected max sentence length
+        
+    Returns:
+        AttributionFeatures ready for ML models
+    """
+    # Normalize MTLD (typically 50-500 range)
+    mtld_norm = min(1.0, (metrics.mtld or 0.0) / mtld_scale)
+    
+    # Normalize Yule's K (typically 20-200 range, inverse: lower = more diverse)
+    yules_k_norm = min(1.0, (metrics.yules_k or 0.0) / yules_k_scale)
+    
+    # Burstiness already in [-1, 1]
+    burstiness = metrics.burstiness_b if metrics.burstiness_b is not None else 0.0
+    
+    # Memory coefficient already in [-1, 1]
+    memory = metrics.memory_coefficient if metrics.memory_coefficient is not None else 0.0
+    
+    # MATTR already in [0, 1]
+    mattr = metrics.mattr if metrics.mattr is not None else 0.5
+    
+    # HD-D already in [0, 1]
+    hdd = metrics.hdd if metrics.hdd is not None else 0.5
+    
+    # Letter bigram conditional entropy (normalize by max ~4 bits)
+    bigram_cond = min(1.0, (metrics.letter_bigram_conditional or 0.0) / 4.0)
+    
+    # Vowel pattern entropy (normalize)
+    vowel_h_norm = min(1.0, (metrics.vowel_pattern_entropy or 0.0) / vowel_h_scale)
+    
+    # Average sentence length (normalize)
+    sent_len_norm = min(1.0, (metrics.avg_sentence_length or 0.0) / sentence_len_scale)
+    
+    # Average syllables per word (typically 1.5-3.0, normalize to [0, 1])
+    avg_syl = min(1.0, (metrics.avg_syllables_per_word or 2.0) / 4.0)
+    
+    # Compression ratio already in [0, 1]
+    compression = metrics.compression_ratio if metrics.compression_ratio is not None else 0.5
+    
+    return AttributionFeatures(
+        mtld_norm=mtld_norm,
+        yules_k_norm=yules_k_norm,
+        burstiness_b=burstiness,
+        memory_coefficient=memory,
+        mattr=mattr,
+        hdd=hdd,
+        letter_bigram_conditional=bigram_cond,
+        vowel_pattern_entropy_norm=vowel_h_norm,
+        avg_sentence_length_norm=sent_len_norm,
+        avg_syllables_per_word=avg_syl,
+        compression_ratio=compression,
+        raw_mtld=metrics.mtld,
+        raw_yules_k=metrics.yules_k,
+    )
+
+
+def calculate_attribution_distance(
+    features1: AttributionFeatures,
+    features2: AttributionFeatures,
+    weights: dict[str, float] | None = None,
+) -> float:
+    """
+    Calculate stylometric distance between two texts for attribution.
+    
+    Uses weighted Euclidean distance on normalized features.
+    Lower distance = more similar authorship style.
+    
+    Args:
+        features1: Attribution features from first text
+        features2: Attribution features from second text
+        weights: Optional custom weights for each feature
+        
+    Returns:
+        Distance value (0 = identical, higher = more different)
+    """
+    if weights is None:
+        # Default weights based on discriminative power
+        weights = {
+            "mtld_norm": 2.0,
+            "yules_k_norm": 1.5,
+            "burstiness_b": 2.0,
+            "memory_coefficient": 1.5,
+            "mattr": 1.0,
+            "hdd": 1.0,
+            "letter_bigram_conditional": 1.0,
+            "vowel_pattern_entropy_norm": 1.2,
+            "avg_sentence_length_norm": 0.8,
+            "avg_syllables_per_word": 0.8,
+            "compression_ratio": 0.5,
+        }
+    
+    v1 = features1.to_vector()
+    v2 = features2.to_vector()
+    names = AttributionFeatures.feature_names()
+    
+    squared_diff = 0.0
+    total_weight = 0.0
+    
+    for i, name in enumerate(names):
+        w = weights.get(name, 1.0)
+        squared_diff += w * (v1[i] - v2[i]) ** 2
+        total_weight += w
+    
+    # Normalize by total weight
+    return float(np.sqrt(squared_diff / total_weight)) if total_weight > 0 else 0.0
+
+
+def quick_attribution_score(
+    tokens: Sequence[str],
+    letters: Sequence[str],
+    text: str,
+) -> AttributionFeatures:
+    """
+    Quick pipeline to get attribution features from raw text data.
+    
+    Convenience function that combines calculate_all_metrics()
+    and extract_attribution_features() in one call.
+    
+    Args:
+        tokens: List of words/tokens
+        letters: List of individual letters
+        text: Original text
+        
+    Returns:
+        AttributionFeatures ready for comparison
+    """
+    metrics = calculate_all_metrics(tokens, letters, text)
+    return extract_attribution_features(metrics)

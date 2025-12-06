@@ -19,6 +19,8 @@ from entropy_analysis.core.attribution import (
 )
 from entropy_analysis.core.metrics import (
     NgramDistributionResult,
+    SyllableEntropyResult,
+    calculate_advanced_burstiness_metrics,
     calculate_average_gries_dp,
     calculate_average_pierrehumbert_beta,
     calculate_burstiness_index,
@@ -27,13 +29,13 @@ from entropy_analysis.core.metrics import (
     calculate_hurst_from_word_lengths,
     calculate_js_divergence,
     calculate_kl_divergence,
-    calculate_mattr,
-    calculate_mtld,
+    calculate_lexical_richness_metrics,
     calculate_ngram_distribution,
     calculate_ngram_entropy,
     calculate_readability,
     calculate_rolling_entropy,
     calculate_simpson_index,
+    calculate_syllable_entropy,
     calculate_yules_k,
     calculate_zipf_coefficient,
     calculate_zipf_mandelbrot,
@@ -116,7 +118,14 @@ class TextAnalysisResult:
     gries_dp: float | None = None  # Average normalized DP
     bigram_entropy: float | None = None  # Word-level bigram entropy
     trigram_entropy: float | None = None  # Word-level trigram entropy
-    burstiness: float | None = None
+    burstiness: float | None = None  # Simple B baseline
+    hdd: float | None = None
+    
+    # ADVANCED BURSTINESS METRICS (Stage 3)
+    kleinberg_bursts: int | None = None  # Number of bursts detected by Kleinberg algorithm
+    kleinberg_burst_ratio: float | None = None  # Ratio of bursty periods
+    burstiness_parameter: float | None = None  # BP from bursty_dynamics
+    memory_coefficient: float | None = None  # MC from bursty_dynamics
     
     # LETTER-LEVEL N-GRAMS (for deeper analysis)
     letter_bigram_entropy: float | None = None  # Letter-level bigram entropy
@@ -137,6 +146,9 @@ class TextAnalysisResult:
     # N-GRAM DISTRIBUTION ANALYSIS (for 9.5/10 accuracy)
     letter_bigram_distribution: NgramDistributionResult | None = None
     letter_trigram_distribution: NgramDistributionResult | None = None
+
+    # SYLLABLE ENTROPY (Russian-specific, highly informative)
+    syllable_entropy: SyllableEntropyResult | None = None
 
     # Metadata
     source_name: str | None = None
@@ -243,11 +255,75 @@ class TextAnalyzer:
             if log_callback:
                 log_callback(msg)
 
+        # ========================================================================
+        # INPUT VALIDATION
+        # ========================================================================
+        
+        # Check for empty or None text
+        if text is None:
+            raise ValueError("Text cannot be None")
+        
+        if not isinstance(text, str):
+            raise TypeError(f"Text must be a string, got {type(text).__name__}")
+        
+        text = text.strip()
+        
+        if len(text) == 0:
+            # Return empty result instead of raising error for graceful handling
+            log("⚠️ Предупреждение: пустой текст")
+            return TextAnalysisResult(
+                n_words=0,
+                n_unique_letters=0,
+                shannon_entropy=None,
+                mean_rank=None,
+                std_rank=None,
+                letter_stats=[],
+                source_name=source_name,
+                alphabet_size=self.normalizer.alphabet_size,
+            )
+        
+        # Check minimum text length (at least 10 characters for meaningful analysis)
+        MIN_TEXT_LENGTH = 10
+        if len(text) < MIN_TEXT_LENGTH:
+            log(f"⚠️ Предупреждение: текст очень короткий ({len(text)} символов), минимально рекомендуется {MIN_TEXT_LENGTH}")
+        
+        # Validate bootstrap parameters
+        if include_bootstrap:
+            if bootstrap_iterations < 100:
+                raise ValueError(f"bootstrap_iterations must be >= 100, got {bootstrap_iterations}")
+            if bootstrap_iterations > 100000:
+                log(f"⚠️ Предупреждение: большое количество bootstrap итераций ({bootstrap_iterations}), это может занять много времени")
+        
         log(f"Начинаем анализ текста: {source_name or 'unnamed'} ({len(text)} символов)...")
 
-        # Count first letters
-        letter_counts = self.normalizer.count_first_letters(text)
-        n_words = sum(letter_counts.values())
+        # Tokenize once (words) for counts and lexical metrics
+        tokens = self.normalizer.tokenize(text)
+        n_words = len(tokens)
+
+        # Count all letters (основной поток для объективных метрик)
+        # ВАЖНО: Считаются ВСЕ буквы текста, а не только первые буквы слов.
+        # Это обеспечивает более объективную оценку распределения символов.
+        letter_counts = self.normalizer.count_letters(text)
+        n_letters = sum(letter_counts.values())
+        
+        # Check if we have any letters at all
+        if n_letters == 0:
+            log("⚠️ Предупреждение: в тексте не найдено ни одной буквы из алфавита")
+            return TextAnalysisResult(
+                n_words=n_words,
+                n_unique_letters=0,
+                shannon_entropy=None,
+                mean_rank=None,
+                std_rank=None,
+                letter_stats=[],
+                source_name=source_name,
+                alphabet_size=self.normalizer.alphabet_size,
+            )
+        
+        # Check minimum letters for reliable statistics
+        MIN_LETTERS_FOR_RELIABLE_STATS = 20
+        if n_letters < MIN_LETTERS_FOR_RELIABLE_STATS:
+            log(f"⚠️ Предупреждение: мало букв ({n_letters}), для надёжной статистики рекомендуется минимум {MIN_LETTERS_FOR_RELIABLE_STATS}")
 
         # Build counts array for all letters in alphabet
         counts_array = np.array(
@@ -259,7 +335,7 @@ class TextAnalyzer:
         letter_stats: list[LetterStats] = []
         for i, letter in enumerate(self.normalizer.letters):
             count = counts_array[i]
-            p = count / n_words if n_words > 0 else 0.0
+            p = count / n_letters if n_letters > 0 else 0.0
             p_log2 = p * np.log2(p) if p > 0 else 0.0
             letter_stats.append(
                 LetterStats(
@@ -292,6 +368,13 @@ class TextAnalyzer:
         bigram_h = None
         trigram_h = None
         burstiness = None
+        hdd = None
+        
+        # Advanced burstiness metrics (Stage 3)
+        kleinberg_bursts = None
+        kleinberg_burst_ratio = None
+        burstiness_parameter = None
+        memory_coefficient = None
         
         # Letter-level n-gram entropies
         letter_bigram_h = None
@@ -308,14 +391,17 @@ class TextAnalyzer:
         
         # Readability metrics
         readability = None
+        
+        # Syllable entropy (Russian-specific)
+        syllable_entropy_result = None
 
-        # Calculate metrics if we have words
-        if n_words > 0:
+        # Calculate metrics if we have letters
+        if n_letters > 0:
             shannon_h = calculate_shannon_entropy(counts_array)
             n_unique = int(np.sum(counts_array > 0))
 
             # Mean and std of ranks
-            probs = counts_array / n_words
+            probs = counts_array / n_letters
             ranks = np.arange(1, len(counts_array) + 1, dtype=np.float64)
             mean_rank = float(np.sum(ranks * probs))
             var_rank = float(np.sum((ranks - mean_rank) ** 2 * probs))
@@ -323,11 +409,11 @@ class TextAnalyzer:
 
             # Normalized entropy
             normalized = calculate_normalized_entropy(
-                shannon_h, self.normalizer.alphabet_size, n_words
+                shannon_h, self.normalizer.alphabet_size, n_letters
             )
 
             # Miller-Madow correction
-            mm_entropy = calculate_miller_madow_correction(shannon_h, n_unique, n_words)
+            mm_entropy = calculate_miller_madow_correction(shannon_h, n_unique, n_letters)
 
             # Diversity indices
             simpson = calculate_simpson_index(counts_array)
@@ -358,23 +444,43 @@ class TextAnalyzer:
             )
             
             # New Word-based metrics
-            log("Токенизация и расчет лексических метрик...")
-            tokens = self.normalizer.tokenize(text)
+            log("Расчет лексических метрик...")
             if tokens:
                 # Readability indices (Flesch & Gunning Fog)
                 log("Расчет индексов удобочитаемости...")
                 readability = calculate_readability(tokens, text)
                 
-                yules_k = calculate_yules_k(tokens)
-                mtld = calculate_mtld(tokens)
-                # MATTR: use smaller window for shorter texts
+                # Syllable entropy (Russian-specific, highly informative)
+                log("Расчет энтропии по слогам...")
+                syllable_entropy_result = calculate_syllable_entropy(tokens)
+                
+                # Lexical diversity via LexicalRichness (with fallbacks)
                 mattr_window = min(500, max(50, len(tokens) // 10))
-                mattr = calculate_mattr(tokens, window_size=mattr_window)
+                lexical_metrics = calculate_lexical_richness_metrics(
+                    tokens,
+                    mattr_window=mattr_window,
+                )
+                yules_k = lexical_metrics.get("yules_k")
+                mtld = lexical_metrics.get("mtld")
+                mattr = lexical_metrics.get("mattr")
+                hdd = lexical_metrics.get("hdd")
                 # Gries' DP: average normalized DP across all words
                 gries_dp = calculate_average_gries_dp(tokens, n_segments=10, min_word_freq=3)
                 bigram_h = calculate_ngram_entropy(tokens, n=2)
                 trigram_h = calculate_ngram_entropy(tokens, n=3)
+                
+                # Burstiness analysis (baseline + advanced)
+                log("Расчет метрик взрывности...")
                 burstiness = calculate_burstiness_index(tokens)
+                
+                # Advanced burstiness metrics (pybursts + bursty_dynamics)
+                if include_advanced_metrics:
+                    log("Расчет продвинутых метрик взрывности (Kleinberg, bursty_dynamics)...")
+                    burst_metrics = calculate_advanced_burstiness_metrics(tokens)
+                    kleinberg_bursts = burst_metrics.kleinberg_bursts
+                    kleinberg_burst_ratio = burst_metrics.kleinberg_burst_ratio
+                    burstiness_parameter = burst_metrics.burstiness_parameter
+                    memory_coefficient = burst_metrics.memory_coefficient
             
             # Letter-level n-gram entropies (for deeper analysis)
             log("Расчет энтропии биграмм и триграмм букв...")
@@ -400,9 +506,16 @@ class TextAnalyzer:
                         log("...Hurst Exponent (DFA)")
                         hurst_result = calculate_hurst_from_word_lengths(tokens)
                     
-                    # Zipf-Mandelbrot (improved Zipf)
-                    log("...Zipf-Mandelbrot fitting")
-                    zipf_mandelbrot = calculate_zipf_mandelbrot(counts_array)
+                    # Zipf-Mandelbrot (improved Zipf) - use WORD frequencies, not letters
+                    # Zipf law is defined for word rank-frequency distribution
+                    log("...Zipf-Mandelbrot fitting (word frequencies)")
+                    from collections import Counter
+                    word_counts = Counter(tokens)
+                    word_freq_array = np.array(
+                        sorted(word_counts.values(), reverse=True), dtype=np.int64
+                    )
+                    if len(word_freq_array) >= 10:  # Need sufficient unique words
+                        zipf_mandelbrot = calculate_zipf_mandelbrot(word_freq_array)
                     
                     # Pierrehumbert's beta (Weibull fitting) - ограничиваем количество слов
                     if len(tokens) >= 100:  # Need sufficient data
@@ -437,10 +550,16 @@ class TextAnalyzer:
             bigram_entropy=bigram_h,
             trigram_entropy=trigram_h,
             burstiness=burstiness,
+            hdd=hdd,
+            kleinberg_bursts=kleinberg_bursts,
+            kleinberg_burst_ratio=kleinberg_burst_ratio,
+            burstiness_parameter=burstiness_parameter,
+            memory_coefficient=memory_coefficient,
             letter_bigram_entropy=letter_bigram_h,
             letter_trigram_entropy=letter_trigram_h,
             letter_bigram_distribution=letter_bigram_dist,
             letter_trigram_distribution=letter_trigram_dist,
+            syllable_entropy=syllable_entropy_result,
             hurst_exponent=hurst_result.hurst_exponent if hurst_result else None,
             zipf_mandelbrot_alpha=zipf_mandelbrot.alpha if zipf_mandelbrot else None,
             zipf_mandelbrot_beta=zipf_mandelbrot.beta if zipf_mandelbrot else None,
@@ -472,9 +591,43 @@ class TextAnalyzer:
         Returns:
             BatchAnalysisResult with all results and aggregate stats
         """
+        # Input validation
+        if texts is None:
+            raise ValueError("texts cannot be None")
+        
+        if not isinstance(texts, list):
+            raise TypeError(f"texts must be a list, got {type(texts).__name__}")
+        
+        if len(texts) == 0:
+            if log_callback:
+                log_callback("⚠️ Предупреждение: пустой список текстов")
+            return BatchAnalysisResult(
+                results=[],
+                extended_stats=None,
+                correlation=None,
+                correlation_slope=None,
+                correlation_intercept=None,
+                correlation_r_squared=None,
+                correlation_p_value=None,
+            )
+        
+        # Validate each text tuple
+        validated_texts: list[tuple[str, str]] = []
+        for i, item in enumerate(texts):
+            if not isinstance(item, tuple):
+                raise TypeError(f"Item {i} must be a tuple (name, text), got {type(item).__name__}")
+            if len(item) != 2:
+                raise ValueError(f"Item {i} must be a tuple of length 2 (name, text), got length {len(item)}")
+            name, text = item
+            if not isinstance(name, str):
+                raise TypeError(f"Item {i}: name must be a string, got {type(name).__name__}")
+            if not isinstance(text, str):
+                raise TypeError(f"Item {i}: text must be a string, got {type(text).__name__}")
+            validated_texts.append((name, text))
+        
         results: list[tuple[str, TextAnalysisResult]] = []
 
-        for i, (name, text) in enumerate(texts):
+        for i, (name, text) in enumerate(validated_texts):
             if log_callback:
                 log_callback(f"[{i+1}/{len(texts)}] Обработка: {name}")
             
@@ -565,9 +718,37 @@ class TextAnalyzer:
         Returns:
             ComparisonResult with divergence metrics
         """
+        # Input validation
+        if text1 is None or text2 is None:
+            raise ValueError("Both texts must be provided (cannot be None)")
+        
+        if not isinstance(text1, str) or not isinstance(text2, str):
+            raise TypeError("Both texts must be strings")
+        
+        text1 = text1.strip()
+        text2 = text2.strip()
+        
+        if len(text1) == 0 or len(text2) == 0:
+            # Return comparison with maximum divergence for empty texts
+            return ComparisonResult(
+                text1_name=name1,
+                text2_name=name2,
+                kl_divergence_p_q=float("inf"),
+                kl_divergence_q_p=float("inf"),
+                js_divergence=1.0,
+                cosine_similarity=0.0,
+            )
+        
+        # Validate mfw_limit
+        if mfw_limit < 1:
+            raise ValueError(f"mfw_limit must be >= 1, got {mfw_limit}")
+        if mfw_limit > 10000:
+            import warnings
+            warnings.warn(f"Very large mfw_limit ({mfw_limit}), this may be slow")
+        
         # Get letter distributions
-        counts1 = self.normalizer.count_first_letters(text1)
-        counts2 = self.normalizer.count_first_letters(text2)
+        counts1 = self.normalizer.count_letters(text1)
+        counts2 = self.normalizer.count_letters(text2)
 
         # Build probability arrays
         n1 = sum(counts1.values())
@@ -747,6 +928,8 @@ class TextAnalyzer:
             "pierrehumbert_beta": [],
             "flesch_reading_ease": [],
             "gunning_fog_index": [],
+            "syllable_count_entropy": [],
+            "vowel_pattern_entropy": [],
         }
 
         for name, result in batch.results:
@@ -773,6 +956,13 @@ class TextAnalyzer:
             data["pierrehumbert_beta"].append(result.pierrehumbert_beta)
             data["flesch_reading_ease"].append(result.flesch_reading_ease)
             data["gunning_fog_index"].append(result.gunning_fog_index)
+            # Syllable entropy metrics
+            data["syllable_count_entropy"].append(
+                result.syllable_entropy.syllable_count_entropy if result.syllable_entropy else None
+            )
+            data["vowel_pattern_entropy"].append(
+                result.syllable_entropy.vowel_pattern_entropy if result.syllable_entropy else None
+            )
 
         return pl.DataFrame(data)
 
@@ -793,6 +983,23 @@ class TextAnalyzer:
         Returns:
             List of (name, result) tuples that are outliers
         """
+        # Input validation
+        if batch is None:
+            raise ValueError("batch cannot be None")
+        
+        if not isinstance(batch, BatchAnalysisResult):
+            raise TypeError(f"batch must be BatchAnalysisResult, got {type(batch).__name__}")
+        
+        if batch.results is None or len(batch.results) == 0:
+            return []
+        
+        valid_methods = {"iqr", "zscore", "modified_zscore"}
+        if method not in valid_methods:
+            raise ValueError(f"method must be one of {valid_methods}, got '{method}'")
+        
+        if threshold is not None and threshold <= 0:
+            raise ValueError(f"threshold must be > 0, got {threshold}")
+        
         entropies = [r.shannon_entropy for _, r in batch.results if r.shannon_entropy is not None]
 
         if len(entropies) < 3:
@@ -861,6 +1068,37 @@ class TextAnalyzer:
         Returns:
             BatchAnalysisResult with analysis for each segment
         """
+        # Input validation
+        if text is None:
+            raise ValueError("text cannot be None")
+        
+        if not isinstance(text, str):
+            raise TypeError(f"text must be a string, got {type(text).__name__}")
+        
+        text = text.strip()
+        
+        if len(text) == 0:
+            if log_callback:
+                log_callback("⚠️ Предупреждение: пустой текст")
+            return BatchAnalysisResult(
+                results=[],
+                extended_stats=None,
+                correlation=None,
+                correlation_slope=None,
+                correlation_intercept=None,
+                correlation_r_squared=None,
+                correlation_p_value=None,
+            )
+        
+        if delimiter is None or not isinstance(delimiter, str):
+            raise TypeError(f"delimiter must be a non-empty string, got {type(delimiter).__name__}")
+        
+        if len(delimiter) == 0:
+            raise ValueError("delimiter cannot be empty")
+        
+        if min_segment_words < 1:
+            raise ValueError(f"min_segment_words must be >= 1, got {min_segment_words}")
+        
         if log_callback:
             log_callback("Разделение текста на сегменты...")
             
@@ -890,10 +1128,8 @@ class TextAnalyzer:
         skipped_count = 0
         
         for segment in segments:
-            # Count words using the same method as analysis - only words with valid first letters
-            # This ensures consistency: if a segment passes filtering, it will have enough words for analysis
-            letter_counts = self.normalizer.count_first_letters(segment)
-            word_count = sum(letter_counts.values())  # Total words with valid first letters
+            # Count words using the tokenizer to mirror main analysis pipeline
+            word_count = len(self.normalizer.tokenize(segment))
             
             # Filter criteria: must have at least min_segment_words words with valid first letters
             if word_count >= min_segment_words:

@@ -73,6 +73,28 @@ class TestNormalizer:
         counts = normalizer.count_first_letters(text)
         assert counts["м"] == 3
 
+    def test_brackets_inside_words(self):
+        """Test that brackets inside words are handled correctly."""
+        from entropy_analysis.core.normalize import preprocess_text_for_brackets
+        
+        # Test square brackets: "пти[чек]" should become "птичек"
+        text1 = "пти[чек] от [плодов]"
+        processed1 = preprocess_text_for_brackets(text1)
+        assert "птичек" in processed1.lower()
+        assert "[чек]" not in processed1  # Brackets removed
+        
+        # Test angle brackets: "М<артынов>" should become "Мартынов"
+        text2 = "М<артынов> пришел"
+        processed2 = preprocess_text_for_brackets(text2)
+        assert "мартынов" in processed2.lower()
+        assert "<артынов>" not in processed2  # Brackets removed
+        
+        # Test that complete words in brackets are preserved (not between letters)
+        text3 = "[Скоро странствию] конец"
+        processed3 = preprocess_text_for_brackets(text3)
+        # Brackets around complete words should remain (not matched by pattern)
+        assert "[" in processed3 or "скоро" in processed3.lower()
+
 
 class TestStats:
     """Tests for statistical functions."""

@@ -848,6 +848,18 @@ class InformationDistances:
 
 
 @dataclass
+class MultipleComparisonCorrection:
+    """Result of multiple comparison correction."""
+    
+    method: str  # "bonferroni", "fdr_bh", "fdr_by"
+    original_p_values: list[float]
+    corrected_p_values: list[float]
+    n_tests: int
+    n_significant_original: int
+    n_significant_corrected: int
+
+
+@dataclass
 class StatisticalComparisonResult:
     """Complete statistical comparison of two groups."""
 
@@ -871,6 +883,9 @@ class StatisticalComparisonResult:
     # Classical tests
     t_test_p_value: float | None = None
     mann_whitney_p_value: float | None = None
+    
+    # Multiple comparison correction (if part of multiple tests)
+    multiple_comparison: MultipleComparisonCorrection | None = None
 
 
 def permutation_test(
@@ -1096,6 +1111,90 @@ def calculate_information_distances(
         hellinger=hellinger,
         bhattacharyya=bhattacharyya,
         total_variation=total_variation,
+    )
+
+
+def correct_multiple_comparisons(
+    p_values: Sequence[float] | NDArray[np.floating],
+    method: str = "fdr_bh",
+    alpha: float = 0.05,
+) -> MultipleComparisonCorrection:
+    """
+    Apply multiple comparison correction to p-values.
+    
+    Methods:
+    - "bonferroni": Conservative, controls Family-Wise Error Rate (FWER)
+    - "fdr_bh": Benjamini-Hochberg procedure, controls False Discovery Rate (FDR)
+    - "fdr_by": Benjamini-Yekutieli procedure, more conservative FDR control
+    
+    Args:
+        p_values: Array of p-values from multiple tests
+        method: Correction method ("bonferroni", "fdr_bh", "fdr_by")
+        alpha: Significance level (default 0.05)
+        
+    Returns:
+        MultipleComparisonCorrection with original and corrected p-values
+    """
+    p_arr = np.asarray(p_values, dtype=np.float64)
+    n_tests = len(p_arr)
+    
+    if n_tests == 0:
+        return MultipleComparisonCorrection(
+            method=method,
+            original_p_values=[],
+            corrected_p_values=[],
+            n_tests=0,
+            n_significant_original=0,
+            n_significant_corrected=0,
+        )
+    
+    # Count original significant tests
+    n_significant_original = int(np.sum(p_arr < alpha))
+    
+    # Apply correction
+    if method == "bonferroni":
+        # Bonferroni: multiply each p-value by number of tests
+        corrected = np.minimum(p_arr * n_tests, 1.0)
+    elif method == "fdr_bh":
+        # Benjamini-Hochberg: step-up procedure
+        # Sort p-values, multiply by n_tests / rank
+        sorted_indices = np.argsort(p_arr)
+        sorted_p = p_arr[sorted_indices]
+        ranks = np.arange(1, n_tests + 1)
+        corrected_sorted = sorted_p * n_tests / ranks
+        # Step-down: ensure monotonicity
+        for i in range(n_tests - 2, -1, -1):
+            corrected_sorted[i] = min(corrected_sorted[i], corrected_sorted[i + 1])
+        # Restore original order
+        corrected = np.zeros_like(p_arr)
+        corrected[sorted_indices] = corrected_sorted
+        corrected = np.minimum(corrected, 1.0)
+    elif method == "fdr_by":
+        # Benjamini-Yekutieli: more conservative, works under any dependency
+        # Uses harmonic number H(n) = sum(1/i) for i=1..n
+        harmonic = np.sum(1.0 / np.arange(1, n_tests + 1))
+        sorted_indices = np.argsort(p_arr)
+        sorted_p = p_arr[sorted_indices]
+        ranks = np.arange(1, n_tests + 1)
+        corrected_sorted = sorted_p * n_tests * harmonic / ranks
+        # Step-down
+        for i in range(n_tests - 2, -1, -1):
+            corrected_sorted[i] = min(corrected_sorted[i], corrected_sorted[i + 1])
+        corrected = np.zeros_like(p_arr)
+        corrected[sorted_indices] = corrected_sorted
+        corrected = np.minimum(corrected, 1.0)
+    else:
+        raise ValueError(f"Unknown correction method: {method}")
+    
+    n_significant_corrected = int(np.sum(corrected < alpha))
+    
+    return MultipleComparisonCorrection(
+        method=method,
+        original_p_values=p_arr.tolist(),
+        corrected_p_values=corrected.tolist(),
+        n_tests=n_tests,
+        n_significant_original=n_significant_original,
+        n_significant_corrected=n_significant_corrected,
     )
 
 
