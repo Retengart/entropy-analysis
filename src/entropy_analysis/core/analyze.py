@@ -797,6 +797,7 @@ class TextAnalyzer:
         auto_name: bool = True,
         include_bootstrap: bool = False,
         include_advanced_metrics: bool = False,
+        min_segment_words: int = 10,
         log_callback: Callable[[str], None] | None = None,
     ) -> BatchAnalysisResult:
         """
@@ -811,6 +812,9 @@ class TextAnalyzer:
             auto_name: Whether to auto-generate names (Segment 1, Segment 2, etc.)
             include_bootstrap: Whether to calculate bootstrap CI for each segment
             include_advanced_metrics: Whether to calculate advanced Phase 2 metrics
+            min_segment_words: Minimum number of words required in a segment to be analyzed.
+                              Segments with fewer words will be filtered out (default: 10).
+                              This helps exclude annotation lines and very short segments.
             log_callback: Optional logger
 
         Returns:
@@ -839,14 +843,56 @@ class TextAnalyzer:
                 correlation_p_value=None,
             )
 
+        # Filter out short segments (annotation lines, etc.)
+        # Count words in each segment to determine if it's substantial
+        filtered_segments: list[str] = []
+        skipped_count = 0
+        
+        for segment in segments:
+            # Count words (simple heuristic: split by whitespace and count non-empty tokens)
+            words = [w for w in segment.split() if w.strip()]
+            word_count = len(words)
+            
+            # Also check if segment has very few lines (likely annotation)
+            lines = [line.strip() for line in segment.split('\n') if line.strip()]
+            line_count = len(lines)
+            
+            # Filter criteria:
+            # 1. Must have at least min_segment_words words
+            # 2. If it's a single line, it must have at least min_segment_words words
+            #    (to avoid single-line annotations)
+            if word_count >= min_segment_words:
+                filtered_segments.append(segment)
+            else:
+                skipped_count += 1
+                if log_callback and skipped_count <= 5:  # Log first few skipped segments
+                    preview = segment[:50].replace('\n', ' ') + ('...' if len(segment) > 50 else '')
+                    log_callback(f"  Пропущен короткий сегмент ({word_count} слов): {preview}")
+
+        if skipped_count > 5 and log_callback:
+            log_callback(f"  ... и еще {skipped_count - 5} коротких сегментов пропущено")
+
+        if not filtered_segments:
+            if log_callback:
+                log_callback(f"Нет сегментов с достаточным количеством слов (минимум {min_segment_words}).")
+            return BatchAnalysisResult(
+                results=[],
+                extended_stats=None,
+                correlation=None,
+                correlation_slope=None,
+                correlation_intercept=None,
+                correlation_r_squared=None,
+                correlation_p_value=None,
+            )
+
         # Create list of (name, text) tuples
         texts: list[tuple[str, str]] = []
-        for i, segment in enumerate(segments, start=1):
+        for i, segment in enumerate(filtered_segments, start=1):
             name = f"Segment {i}" if auto_name else f"Text {i}"
             texts.append((name, segment))
 
         if log_callback:
-            log_callback(f"Найдено {len(texts)} сегментов. Начинаем анализ...")
+            log_callback(f"Найдено {len(texts)} сегментов (пропущено {skipped_count} коротких). Начинаем анализ...")
 
         # Use existing batch analysis
         return self.analyze_batch(

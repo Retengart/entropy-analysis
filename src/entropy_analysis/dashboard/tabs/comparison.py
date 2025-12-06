@@ -270,6 +270,18 @@ def author_comparison(options):
 
     # Delimiter
     delimiter = st.text_input("Разделитель произведений", "***", key="comparison_delimiter")
+    
+    # Filter options
+    with st.expander("⚙️ Настройки фильтрации", expanded=False):
+        min_words = st.number_input(
+            "Минимальное количество слов в сегменте",
+            min_value=1,
+            max_value=1000,
+            value=10,
+            step=1,
+            help="Сегменты с меньшим количеством слов будут пропущены (помогает исключить аннотационные строки и заголовки)",
+            key="comparison_min_words"
+        )
 
     if st.button("🔍 Сравнить авторов", type="primary", key="compare_authors_btn"):
         if not text1.strip() or not text2.strip():
@@ -296,6 +308,7 @@ def author_comparison(options):
                     delimiter=delimiter,
                     auto_name=True,
                     include_advanced_metrics=options["include_advanced_metrics"],
+                    min_segment_words=min_words,
                     log_callback=status_logger,
                 )
                 
@@ -305,6 +318,7 @@ def author_comparison(options):
                     delimiter=delimiter,
                     auto_name=True,
                     include_advanced_metrics=options["include_advanced_metrics"],
+                    min_segment_words=min_words,
                     log_callback=status_logger,
                 )
                 status.update(label="Анализ авторов завершен!", state="complete", expanded=False)
@@ -315,12 +329,14 @@ def author_comparison(options):
                     delimiter=delimiter,
                     auto_name=True,
                     include_advanced_metrics=options["include_advanced_metrics"],
+                    min_segment_words=min_words,
                 )
                 batch2 = st.session_state.analyzer.split_and_analyze(
                     text2,
                     delimiter=delimiter,
                     auto_name=True,
                     include_advanced_metrics=options["include_advanced_metrics"],
+                    min_segment_words=min_words,
                 )
 
         n1 = len(batch1.results)
