@@ -1,0 +1,57 @@
+services:
+  # Streamlit Dashboard (Web UI)
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: entropy-dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      - STREAMLIT_THEME_BASE=light
+      - STREAMLIT_THEME_PRIMARY_COLOR=#2E86AB
+      - STREAMLIT_THEME_BACKGROUND_COLOR=#FFFFFF
+      - STREAMLIT_THEME_SECONDARY_BACKGROUND_COLOR=#F5F5F5
+      - STREAMLIT_THEME_TEXT_COLOR=#000000
+    volumes:
+      # Mount sample texts for analysis (optional)
+      - ./sample_texts:/app/sample_texts:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # FastAPI Backend (REST API)
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: entropy-api
+    command: ["uvicorn", "entropy_analysis.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      - UVICORN_HOST=0.0.0.0
+      - UVICORN_PORT=8000
+    volumes:
+      - ./sample_texts:/app/sample_texts:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+# Networks
+networks:
+  default:
+    name: entropy-analysis-net
+

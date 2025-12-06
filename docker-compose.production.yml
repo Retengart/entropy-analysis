@@ -1,0 +1,119 @@
+services:
+  # Streamlit Dashboard (Web UI) - Production
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: entropy-dashboard-prod
+    expose:
+      - "8501"
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=200
+      - STREAMLIT_THEME_BASE=light
+      - STREAMLIT_THEME_PRIMARY_COLOR=#2E86AB
+      - STREAMLIT_THEME_BACKGROUND_COLOR=#FFFFFF
+      - STREAMLIT_THEME_SECONDARY_BACKGROUND_COLOR=#F5F5F5
+      - STREAMLIT_THEME_TEXT_COLOR=#000000
+    volumes:
+      - ./sample_texts:/app/sample_texts:ro
+      - streamlit-cache:/app/.streamlit
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - entropy-net
+
+  # FastAPI Backend (REST API) - Production
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: entropy-api-prod
+    command: [
+      "uvicorn",
+      "entropy_analysis.api.main:app",
+      "--host", "0.0.0.0",
+      "--port", "8000",
+      "--workers", "4",
+      "--loop", "uvloop",
+      "--log-level", "info"
+    ]
+    expose:
+      - "8000"
+    environment:
+      - UVICORN_HOST=0.0.0.0
+      - UVICORN_PORT=8000
+      - UVICORN_WORKERS=4
+    volumes:
+      - ./sample_texts:/app/sample_texts:ro
+      - api-cache:/app/.cache
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - entropy-net
+
+  # Caddy reverse proxy with automatic HTTPS
+  caddy:
+    image: caddy:2-alpine
+    container_name: entropy-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3 QUIC
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      dashboard:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - entropy-net
+
+# Named volumes for persistence
+volumes:
+  streamlit-cache:
+    driver: local
+  api-cache:
+    driver: local
+  caddy-data:
+    driver: local
+  caddy-config:
+    driver: local
+
+# Networks
+networks:
+  entropy-net:
+    driver: bridge
