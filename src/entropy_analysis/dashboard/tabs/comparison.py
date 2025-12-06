@@ -97,23 +97,62 @@ def text_comparison(options):
 
         st.success("✅ Сравнение завершено!")
 
-        # Comparison metrics
+        # Comparison metrics - Divergences
+        st.subheader("📊 Метрики расхождения")
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.metric("KL(P||Q)", f"{comparison.kl_divergence_p_q:.4f}")
+            st.metric(
+                "KL(P||Q)", 
+                f"{comparison.kl_divergence_p_q:.4f}",
+                help="KL-дивергенция (несимметричная). Показывает информационные потери.",
+            )
         with col2:
-            st.metric("JS Divergence", f"{comparison.js_divergence:.4f}")
+            st.metric(
+                "JS Divergence", 
+                f"{comparison.js_divergence:.4f}",
+                help="Jensen-Shannon дивергенция (симметричная, 0-1). Стандартная метрика.",
+            )
         with col3:
             st.metric(
                 "Cosine Similarity",
                 f"{comparison.cosine_similarity:.4f}" if comparison.cosine_similarity else "—",
+                help="Косинусное сходство распределений букв (0-1). Выше = похожее.",
+            )
+        
+        # Information distances
+        st.subheader("📏 Информационные расстояния")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric(
+                "Wasserstein",
+                f"{comparison.wasserstein_distance:.4f}" if comparison.wasserstein_distance else "—",
+                help="Расстояние Вассерштейна (Earth Mover's). Учитывает 'близость' категорий.",
+            )
+        with col2:
+            st.metric(
+                "Hellinger",
+                f"{comparison.hellinger_distance:.4f}" if comparison.hellinger_distance else "—",
+                help="Расстояние Хеллингера (0-1). Симметричное, устойчивое к нулям.",
+            )
+        with col3:
+            st.metric(
+                "Total Variation",
+                f"{comparison.total_variation_distance:.4f}" if comparison.total_variation_distance else "—",
+                help="Total Variation Distance (0-1). Максимальная разница вероятностей.",
             )
 
         # Delta Metrics (если включены)
         if comparison.burrows_delta is not None:
             st.subheader("🔍 Атрибуция (Delta)")
             st.info(f"Рассчитано на {comparison.mfw_used} самых частых словах (MFW)")
+            st.warning("""
+            ⚠️ **Ограничение**: Delta-метрики разработаны для сравнения текста с **корпусом** 
+            (множеством текстов известных авторов). При сравнении только 2 текстов 
+            Z-scores вычисляются упрощённо и результаты следует интерпретировать осторожно.
+            Для надёжной атрибуции используйте вкладку "Сравнение авторов" с множеством текстов.
+            """)
             
             d_col1, d_col2, d_col3 = st.columns(3)
             
@@ -294,6 +333,20 @@ def author_comparison(options):
         st.success(
             f"✅ Проанализировано: {author1_name} - {n1} произв., {author2_name} - {n2} произв."
         )
+
+        # Предупреждение о минимальном размере выборки
+        min_recommended = 20
+        if n1 < min_recommended or n2 < min_recommended:
+            st.warning(f"""
+            ⚠️ **Малый размер выборки**: Для надёжных статистических выводов рекомендуется 
+            минимум **{min_recommended} текстов** на автора. 
+            Текущее: {author1_name} = {n1}, {author2_name} = {n2}.
+            
+            С малыми выборками:
+            - P-values могут быть ненадёжными
+            - Доверительные интервалы будут широкими
+            - Effect size (Cohen's d) наиболее информативен
+            """)
 
         # ========================================================================
         # MAIN COMPARISON SECTION

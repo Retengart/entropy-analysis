@@ -48,6 +48,7 @@ from entropy_analysis.core.stats import (
     NormalizedEntropy,
     bootstrap_entropy_confidence,
     calculate_correlation,
+    calculate_information_distances,
     calculate_enhanced_metrics,
     calculate_extended_stats,
     calculate_mad,
@@ -157,6 +158,11 @@ class ComparisonResult:
     kl_divergence_q_p: float  # KL(Q || P)
     js_divergence: float  # Jensen-Shannon (symmetric)
     cosine_similarity: float | None = None
+    
+    # Information distances (more robust metrics)
+    wasserstein_distance: float | None = None
+    hellinger_distance: float | None = None
+    total_variation_distance: float | None = None
     
     # Delta metrics (Attribution)
     burrows_delta: float | None = None
@@ -561,6 +567,9 @@ class TextAnalyzer:
             float(np.dot(probs1, probs2) / (norm1 * norm2)) if norm1 > 0 and norm2 > 0 else 0.0
         )
         
+        # Information distances (more robust for comparing distributions)
+        info_dist = calculate_information_distances(probs1, probs2)
+        
         # Delta Metrics (Attribution)
         burrows = None
         eders = None
@@ -611,6 +620,9 @@ class TextAnalyzer:
             kl_divergence_q_p=kl_q_p.divergence,
             js_divergence=js.divergence,
             cosine_similarity=cosine_sim,
+            wasserstein_distance=info_dist.wasserstein,
+            hellinger_distance=info_dist.hellinger,
+            total_variation_distance=info_dist.total_variation,
             burrows_delta=burrows,
             eders_delta=eders,
             cosine_delta=cosine_d,
