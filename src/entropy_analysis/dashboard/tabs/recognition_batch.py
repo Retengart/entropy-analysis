@@ -198,6 +198,23 @@ def recognition_batch_tab():
         _render_tables(_tables_to_dict(result))
         _render_predictions([p.__dict__ for p in result.predictions])
 
+        # Conclusion / summary
+        true_labels = [p.true_label for p in result.predictions if p.true_label]
+        pred_labels = [p.predicted_label for p in result.predictions]
+        if true_labels and len(true_labels) == len(result.predictions):
+            acc = sum(t == p for t, p in zip(true_labels, pred_labels)) / len(true_labels)
+            avg_conf = sum(p.posteriors[p.predicted_label] for p in result.predictions) / len(result.predictions)
+            st.info(
+                f"Итог: точность {acc:.3f}, средняя уверенность {avg_conf:.3f}. "
+                f"{'Модель склоняется к одному классу' if len(set(pred_labels))==1 else 'Предсказания распределены по классам'}."
+            )
+        else:
+            avg_conf = sum(p.posteriors[p.predicted_label] for p in result.predictions) / len(result.predictions)
+            st.info(
+                f"Итог: рассчитаны постериоры по {len(result.predictions)} сегментам, средняя уверенность {avg_conf:.3f}. "
+                "Точные метки не заданы, точность не вычислена."
+            )
+
 
 def _tables_to_dict(result):
     conds = {}
