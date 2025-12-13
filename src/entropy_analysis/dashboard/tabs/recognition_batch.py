@@ -206,6 +206,7 @@ def recognition_batch_tab():
                 error_target=req.error_target,
                 max_features=req.max_features,
                 min_informativeness=req.min_informativeness,
+                feature_profile=req.feature_profile,
             )
         except Exception as exc:  # noqa: BLE001
             st.error(f"Ошибка расчёта: {exc}")
