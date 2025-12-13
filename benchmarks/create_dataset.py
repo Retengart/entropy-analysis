@@ -24,7 +24,15 @@ from entropy_analysis.core.normalize import preprocess_text_for_brackets
 
 
 def split_text_by_delimiter(text: str, delimiter: str = "***") -> List[str]:
-    """Split text into segments by delimiter."""
+    """Split text into segments by delimiter.
+    
+    Args:
+        text: Input text
+        delimiter: Delimiter string (e.g., "***" or "=====")
+    
+    Returns:
+        List of text segments
+    """
     segments = text.split(delimiter)
     # Clean up segments
     segments = [s.strip() for s in segments if s.strip()]
@@ -35,6 +43,7 @@ def create_dataset_from_files(
     file_paths: List[Path],
     min_words: int = 20,
     max_segments_per_author: int = None,
+    delimiter: str = "***",
 ) -> Dict:
     """Create benchmark dataset from text files.
     
@@ -42,6 +51,7 @@ def create_dataset_from_files(
         file_paths: List of paths to text files. Filename should be author name.
         min_words: Minimum number of words per segment (filter out short texts)
         max_segments_per_author: Limit number of segments per author (for balance)
+        delimiter: Text delimiter to split segments (default: "***")
         
     Returns:
         dict with structure:
@@ -74,7 +84,7 @@ def create_dataset_from_files(
         content = preprocess_text_for_brackets(content)
         
         # Split into segments
-        segments = split_text_by_delimiter(content, delimiter="***")
+        segments = split_text_by_delimiter(content, delimiter=delimiter)
         
         print(f"  Found {len(segments)} segments")
         
@@ -186,6 +196,12 @@ def main():
         default=None,
         help='Maximum segments per author (for balancing)',
     )
+    parser.add_argument(
+        '--delimiter',
+        type=str,
+        default='***',
+        help='Text delimiter to split segments (default: ***)',
+    )
     
     args = parser.parse_args()
     
@@ -225,6 +241,7 @@ def main():
         valid_paths,
         min_words=args.min_words,
         max_segments_per_author=args.max_segments,
+        delimiter=args.delimiter,
     )
     
     # Print statistics

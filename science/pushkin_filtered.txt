@@ -1,19 +1,9 @@
-***
-Dis moi, pourquoi l'Escamoteur
-fist-il sifflé par le parterre?
-Hélas! c'est que le pauvre auteur
-L'escamota de Moliére.
-Перевод
+======
 Скажите мне, почему «Похититель»
 Освистан партером?
 Увы, потому что бедный автор
 Похитил его у Мольера.
-***
-Je chante ce combat, que Toly remporta,
-Oú inaint guerrier périt, où Paul se signala,
-Nicolas Maturin et la belle Nitouche,
-Dont la main fut ie prix d'une horrible escarmouche.
-Перевод
+======
 Пою сей бой, в котором Толи одолел,
 Где погиб не один воин, где Поль отличился,
 Николая Матюрена и прекрасную Нитуш,
@@ -3791,7 +3781,7 @@ Ma foi, voilà Pouchkine.
 Словами истины, свободными, простыми,
 Им славу прошлых лет в рассказах оживит
 И доброго царя в слезах благословит.
-***
+======
 Итак я счастлив был, итак я наслаждался,
 Отрадой тихою, восторгом упивался…
 И где веселья быстрый день?
@@ -3815,7 +3805,8 @@ Ma foi, voilà Pouchkine.
 Стыдись!" – он закричал." Оставь, гусар… ох! сердцу больно.
 Ты, знать, не горевал.
 Увы! одной слезы довольно,
-Чтоб отравить бокал!.." ***
+Чтоб отравить бокал!.." 
+======
 Угрюмых тройка есть певцов —
 Шихматов, Шаховской, Шишков,
 Уму есть тройка супостатов —
@@ -5385,7 +5376,7 @@ Mais pour une grâce, – oh, mon Dieu, non.5
 И я сказал певице милой:" Волшебен голос твой унылый,
 Но слово милыя моей
 Волшебней нежных песен Лилы" .
-***
+======
 Любовь одна – веселье жизни хладной,
 Любовь одна – мучение сердец.
 Она дарит один лишь миг отрадный,
@@ -6221,48 +6212,6 @@ VIII.
 ЛицейскойМолоствов.
 ***
 ======
-Couplets
-Quand un poète en son extase
-Vous lit son ode ou son bouquet,
-Quand un conteur traоne sa phrase,
-Quand on écoute un perroquet,
-Ne trouvant pas le mot pour rire,
-On dort, on baille en son mouchoir,
-On attend le moment de dire:
-Jusqu'au plaisir de nous revoir.
-Mais tête-а-tete avec sa belle,
-Ou bien avec des gens d'esprit,
-Le vrai bonheur se renouvelle,
-On est content, l'on chante, on rit.
-Prolongez vos paisibles veilles,
-Et chantez vers la fin du soir
-A vos amis, àvos bouteilles:
-Jusqu'au plaisir de nous revoir.
-Amis, la vie est un passage
-Et tout s'écoule avec le temps,
-L'amour aussi n'est qu'un volage,
-Un oiseau de notre printemps;
-Trop tôt il fuit, riant sous cape —
-C'est pour toujours, adieu l'Espoir!
-On ne dit pas dès qu'il s'échappe:
-Jusqu'au plaisir de nous revoir.
-Le temps s'enfuit triste et barbare
-Et tôt ou tard on va là-hout.
-Souvent – le cas n'est pas si rare —
-Hasard nous sauve du tombeau.
-Des maux s'éloignent les cohortes
-Et le squelette horrible et noir
-S'en va frappant àd'autres portes:
-Jusqu'au plaisir de nous revoir.
-Mais quoi? je sens que je me lasse
-En lassant mes chers auditeurs,
-Allons, je descends du Parnasse —
-Il n'est pas fait pour les chanteurs,
-Pour des couplets mon feu s'allume,
-Sur un refrain j'ai du pouvoir,
-C'est bien assez – adieu, ma plume!
-Jusqu'au plaisir de nous revoir.
-Перевод
 Куплеты
 Когда поэт в восторге
 Читает вам свою оду или поздравительные стихи,
@@ -22254,7 +22203,7 @@ Exegi monumentum.87
 Успокой меня, творец.
 Но твоя да будет воля,
 Не моя. – Кто там идет?..
-***
+======
 О нет, мне жизнь не надоела,
 Я жить люблю, я жить хочу,
 Душа не вовсе охладела,

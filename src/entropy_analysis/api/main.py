@@ -12,6 +12,18 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from entropy_analysis.core.analyze import TextAnalyzer
 from entropy_analysis.core.normalize import Alphabet
+from entropy_analysis.core.recognition import (
+    NoiseConfig as RecognitionNoiseConfig,
+    RecognitionAnalysis,
+    RecognitionEngine,
+    RecognitionInput,
+    RecognitionRun,
+    build_recognition_input,
+)
+from entropy_analysis.core.recognition_batch import (
+    Segment as RecSegment,
+    train_and_run_batch,
+)
 from entropy_analysis.models.schemas import (
     AnalyzerConfigRequest,
     BatchTextsRequest,
@@ -19,6 +31,15 @@ from entropy_analysis.models.schemas import (
     ComparisonResponse,
     RollingEntropyRequest,
     RollingEntropyResponse,
+    FeatureMetricsResponse,
+    PairMetricsResponse,
+    RecognitionBatchRequest,
+    RecognitionBatchResponse,
+    RecognitionRequest,
+    RecognitionResponse,
+    RecognitionRunResponse,
+    SegmentPredictionResponse,
+    TextSegment,
     TextAnalysisResponse,
     UploadedTextRequest,
 )
@@ -160,6 +181,63 @@ def _result_to_response(result: Any) -> TextAnalysisResponse:
         source_name=result.source_name,
         alphabet_size=result.alphabet_size,
     )
+
+
+def _feature_metrics_response(feature) -> FeatureMetricsResponse:
+    return FeatureMetricsResponse(
+        index=feature.index,
+        name=feature.name,
+        values_count=feature.values_count,
+        informativeness=feature.informativeness,
+        error=feature.error,
+        px=feature.px,
+        passes_threshold=feature.passes_threshold,
+    )
+
+
+def _pair_metrics_response(pair) -> PairMetricsResponse | None:
+    if pair is None:
+        return None
+    return PairMetricsResponse(
+        indices=pair.indices,
+        names=pair.names,
+        error=pair.error,
+        passes_threshold=pair.passes_threshold,
+    )
+
+
+def _run_to_response(run: RecognitionRun) -> RecognitionRunResponse:
+    return RecognitionRunResponse(
+        features=[_feature_metrics_response(f) for f in run.features],
+        best_feature=_feature_metrics_response(run.best_feature) if run.best_feature else None,
+        best_pair=_pair_metrics_response(run.best_pair),
+        min_error=run.min_error,
+    )
+
+
+def _tables_to_response(tables) -> dict:
+    conditionals = {}
+    for feat in tables.features:
+        conditionals[feat.name] = feat.conditional.tolist()
+    return {
+        "classes": tables.class_labels,
+        "priors": tables.priors.tolist(),
+        "feature_values": tables.feature_values,
+        "conditionals": conditionals,
+    }
+
+
+def _predictions_to_response(preds) -> list[SegmentPredictionResponse]:
+    return [
+        SegmentPredictionResponse(
+            name=p.name,
+            true_label=p.true_label,
+            predicted_label=p.predicted_label,
+            posteriors=p.posteriors,
+            feature_values=p.feature_values,
+        )
+        for p in preds
+    ]
 
 
 @app.get("/")
@@ -354,6 +432,110 @@ async def analyze_batch(request: BatchTextsRequest):
         extended_stats=extended,
         correlation=correlation,
     )
+
+
+@app.post("/api/v1/recognition", response_model=RecognitionResponse)
+async def run_recognition(request: RecognitionRequest):
+    """
+    Run probabilistic recognition algorithm (lab 40).
+    """
+    try:
+        noise_cfg = (
+            RecognitionNoiseConfig(
+                factor=request.noise.factor,
+                mode=request.noise.mode,
+                seed=request.noise.seed,
+                renormalize=request.noise.renormalize,
+            )
+            if request.noise
+            else None
+        )
+
+        if request.use_sample:
+            sample = RecognitionEngine.sample_input()
+            input_data = RecognitionInput(
+                priors=sample.priors,
+                features=sample.features,
+                error_target=request.error_target,
+                noise=noise_cfg,
+            )
+        else:
+            if len(request.classes) != len(request.priors):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Length of classes and priors must match.",
+                )
+
+            feature_dicts = []
+            for feat in request.features:
+                if len(feat.conditional) != len(request.priors):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Feature {feat.name or '<unnamed>'} conditional rows must equal "
+                            "number of classes."
+                        ),
+                    )
+                feature_dicts.append(
+                    {
+                        "name": feat.name,
+                        "values_count": feat.values_count,
+                        "conditional": feat.conditional,
+                    }
+                )
+
+            input_data = build_recognition_input(
+                request.priors,
+                feature_dicts,
+                error_target=request.error_target,
+                noise=noise_cfg,
+            )
+
+        analysis: RecognitionAnalysis = RecognitionEngine.analyze(input_data)
+        return RecognitionResponse(
+            clean=_run_to_response(analysis.clean),
+            noisy=_run_to_response(analysis.noisy) if analysis.noisy else None,
+            delta_abs=analysis.delta_abs,
+            delta_rel=analysis.delta_rel,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/recognition/batch", response_model=RecognitionBatchResponse)
+async def run_recognition_batch(request: RecognitionBatchRequest):
+    """
+    Train probability tables from labeled segments and run recognition on them.
+    """
+    try:
+        segments = [RecSegment(text=s.text, name=s.name, label=s.label) for s in request.segments]
+        noise_cfg = (
+            RecognitionNoiseConfig(
+                factor=request.noise.factor,
+                mode=request.noise.mode,
+                seed=request.noise.seed,
+                renormalize=request.noise.renormalize,
+            )
+            if request.noise
+            else None
+        )
+        result = train_and_run_batch(
+            segments=segments,
+            smoothing=request.smoothing,
+            noise=noise_cfg,
+            error_target=request.error_target,
+        )
+        return RecognitionBatchResponse(
+            tables=_tables_to_response(result.tables),
+            recognition=_run_to_response(result.recognition),
+            predictions=_predictions_to_response(result.predictions),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def run_server(host: str = "0.0.0.0", port: int = 8000):

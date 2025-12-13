@@ -118,15 +118,15 @@ class EntropyBasedClassifier:
             'perplexity',
             'evenness',
             'alphabet_utilization',
-            'renyi_h0',
-            'renyi_h2',
-            'renyi_h_inf',
+            'renyi_0',
+            'renyi_2',
+            'renyi_inf',
             'uniqueness_ratio',
         ]
         
     def _extract_features(self, text: str) -> np.ndarray:
         """Extract entropy-based features from text."""
-        result = self.analyzer.analyze(text, include_enhanced=True)
+        result = self.analyzer.analyze(text, include_advanced_metrics=True)
         
         if result.shannon_entropy is None:
             # Return zeros if analysis failed
@@ -139,9 +139,9 @@ class EntropyBasedClassifier:
             features.append(result.enhanced.perplexity)
             features.append(result.enhanced.evenness)
             features.append(result.enhanced.alphabet_utilization)
-            features.append(result.enhanced.renyi_h0)
-            features.append(result.enhanced.renyi_h2)
-            features.append(result.enhanced.renyi_h_inf)
+            features.append(result.enhanced.renyi_0)
+            features.append(result.enhanced.renyi_2)
+            features.append(result.enhanced.renyi_inf)
             features.append(result.enhanced.uniqueness_ratio)
         else:
             features.extend([0.0] * 7)

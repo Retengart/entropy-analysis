@@ -35,6 +35,7 @@ dependencies = [
     "lexicalrichness>=0.5.0",
     "pybursts>=0.1.0",
     "bursty-dynamics>=0.1.0",
+    "catboost>=1.2.0",
 ]
 
 [project.optional-dependencies]

@@ -11,6 +11,8 @@ from entropy_analysis.dashboard.state import init_session_state
 from entropy_analysis.dashboard.tabs.about import about_page
 from entropy_analysis.dashboard.tabs.batch_analysis import batch_analysis
 from entropy_analysis.dashboard.tabs.comparison import author_comparison, text_comparison
+from entropy_analysis.dashboard.tabs.recognition import recognition_tab
+from entropy_analysis.dashboard.tabs.recognition_batch import recognition_batch_tab
 from entropy_analysis.dashboard.tabs.rolling import rolling_analysis, split_analysis
 from entropy_analysis.dashboard.tabs.single_analysis import single_text_analysis
 
@@ -162,6 +164,8 @@ def main():
             "📁 Пакетный",
             "🔄 Сравнение текстов",
             "📈 Динамика",
+            "🧭 Распознавание",
+            "🧭 Пакетное распознавание",
             "ℹ️ О проекте",
         ]
     )
@@ -185,6 +189,12 @@ def main():
         rolling_analysis(options)
 
     with tabs[6]:
+        recognition_tab(options)
+
+    with tabs[7]:
+        recognition_batch_tab()
+
+    with tabs[8]:
         about_page()
 
 

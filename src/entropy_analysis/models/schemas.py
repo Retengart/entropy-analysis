@@ -254,3 +254,130 @@ class AnalyzerConfigRequest(BaseModel):
     keep_yo: bool = Field(False, description="Keep ё instead of replacing with е")
     keep_j: bool = Field(False, description="Keep й instead of replacing with и")
     min_token_len: int = Field(1, description="Minimum token length")
+
+
+# Recognition algorithm (lab 40)
+
+
+class NoiseSettings(BaseModel):
+    """Noise injection settings."""
+
+    factor: float = Field(0.0, ge=0, description="Uniform noise magnitude [-factor, factor]")
+    mode: str = Field("uniform", description="Noise mode (only 'uniform' supported)")
+    seed: int | None = Field(None, description="Random seed for reproducibility")
+    renormalize: bool = Field(
+        True, description="Renormalize conditional probabilities after noise injection"
+    )
+
+
+class FeatureProbabilityInput(BaseModel):
+    """Conditional probabilities for a single feature."""
+
+    name: str | None = Field(None, description="Feature name")
+    values_count: int = Field(..., ge=2, description="Number of discrete values for the feature")
+    conditional: list[list[float]] = Field(
+        ...,
+        description="Matrix of shape (M, values_count): P(x_l^k | A_i) per class and value",
+    )
+
+
+class RecognitionRequest(BaseModel):
+    """Request to run the recognition algorithm."""
+
+    classes: list[str] = Field(..., description="Class labels A_i (only length is used)")
+    priors: list[float] = Field(..., description="Prior probabilities P(A_i)")
+    features: list[FeatureProbabilityInput] = Field(
+        ..., description="Per-feature conditional probabilities"
+    )
+    error_target: float = Field(0.05, gt=0, lt=1, description="Target error threshold P(e)_zad")
+    noise: NoiseSettings | None = Field(None, description="Noise configuration (optional)")
+    use_sample: bool = Field(
+        False,
+        description="Use built-in lab sample (overrides priors/features); noise still applies if set",
+    )
+
+
+class FeatureMetricsResponse(BaseModel):
+    """Per-feature metrics."""
+
+    index: int
+    name: str
+    values_count: int
+    informativeness: float
+    error: float
+    px: list[float]
+    passes_threshold: bool
+
+
+class PairMetricsResponse(BaseModel):
+    """Metrics for a feature pair."""
+
+    indices: tuple[int, int]
+    names: tuple[str, str]
+    error: float
+    passes_threshold: bool
+
+
+class RecognitionRunResponse(BaseModel):
+    """Results for one run (clean or noisy)."""
+
+    features: list[FeatureMetricsResponse]
+    best_feature: FeatureMetricsResponse | None
+    best_pair: PairMetricsResponse | None
+    min_error: float
+
+
+class RecognitionResponse(BaseModel):
+    """Full recognition analysis response."""
+
+    clean: RecognitionRunResponse
+    noisy: RecognitionRunResponse | None
+    delta_abs: float | None
+    delta_rel: float | None
+
+
+# Batch recognition on text segments
+
+
+class TextSegment(BaseModel):
+    """Text segment with optional label."""
+
+    text: str = Field(..., description="Segment text")
+    name: str | None = Field(None, description="Optional name/id")
+    label: str | None = Field(None, description="Class label (required for training)")
+
+
+class SegmentPredictionResponse(BaseModel):
+    """Prediction for a single segment."""
+
+    name: str | None
+    true_label: str | None
+    predicted_label: str
+    posteriors: dict[str, float]
+    feature_values: dict[str, str]
+
+
+class TrainedTablesResponse(BaseModel):
+    """Trained priors and conditional tables."""
+
+    classes: list[str]
+    priors: list[float]
+    feature_values: dict[str, list[str]]
+    conditionals: dict[str, list[list[float]]]
+
+
+class RecognitionBatchRequest(BaseModel):
+    """Batch recognition request for text segments."""
+
+    segments: list[TextSegment] = Field(..., description="Segments with labels for training")
+    error_target: float = Field(0.05, gt=0, lt=1, description="Target error threshold")
+    smoothing: float = Field(1e-3, gt=0, description="Laplace smoothing for probabilities")
+    noise: NoiseSettings | None = Field(None, description="Optional noise injection")
+
+
+class RecognitionBatchResponse(BaseModel):
+    """Batch recognition response."""
+
+    tables: TrainedTablesResponse
+    recognition: RecognitionRunResponse
+    predictions: list[SegmentPredictionResponse]
