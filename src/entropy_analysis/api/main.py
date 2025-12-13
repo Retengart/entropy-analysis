@@ -526,11 +526,15 @@ async def run_recognition_batch(request: RecognitionBatchRequest):
             smoothing=request.smoothing,
             noise=noise_cfg,
             error_target=request.error_target,
+            max_features=request.max_features,
+            min_informativeness=request.min_informativeness,
+            feature_profile=request.feature_profile,
         )
         return RecognitionBatchResponse(
             tables=_tables_to_response(result.tables),
             recognition=_run_to_response(result.recognition),
             predictions=_predictions_to_response(result.predictions),
+            used_features=result.used_features,
         )
     except HTTPException:
         raise

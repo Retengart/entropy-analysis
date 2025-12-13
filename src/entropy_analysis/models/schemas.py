@@ -373,6 +373,15 @@ class RecognitionBatchRequest(BaseModel):
     error_target: float = Field(0.05, gt=0, lt=1, description="Target error threshold")
     smoothing: float = Field(1e-3, gt=0, description="Laplace smoothing for probabilities")
     noise: NoiseSettings | None = Field(None, description="Optional noise injection")
+    max_features: int | None = Field(
+        None, ge=1, description="Use top-K most informative features (None = use all)"
+    )
+    min_informativeness: float = Field(
+        0.0, ge=0.0, description="Drop features with informativeness below this threshold"
+    )
+    feature_profile: str = Field(
+        "full", description="Feature set: 'baseline', 'compact', or 'full'"
+    )
 
 
 class RecognitionBatchResponse(BaseModel):
@@ -381,3 +390,4 @@ class RecognitionBatchResponse(BaseModel):
     tables: TrainedTablesResponse
     recognition: RecognitionRunResponse
     predictions: list[SegmentPredictionResponse]
+    used_features: list[str]

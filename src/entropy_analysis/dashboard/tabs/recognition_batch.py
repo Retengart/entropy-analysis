@@ -9,6 +9,7 @@ from typing import List
 
 import streamlit as st
 import polars as pl
+import plotly.express as px
 
 from entropy_analysis.core.recognition import NoiseConfig as RecognitionNoiseConfig
 from entropy_analysis.core.recognition_batch import (
@@ -77,6 +78,18 @@ def _render_predictions(preds: list[dict]):
         )
     st.dataframe(pl.DataFrame(rows), use_container_width=True)
 
+    # Distribution of predicted classes
+    pred_counts = (
+        pl.DataFrame(rows)
+        .group_by("predicted")
+        .count()
+        .rename({"count": "n"})
+        .sort("n", descending=True)
+    )
+    if pred_counts.height > 0:
+        fig = px.bar(pred_counts.to_pandas(), x="predicted", y="n", title="Распределение предсказанных классов")
+        st.plotly_chart(fig, use_container_width=True)
+
 
 def recognition_batch_tab():
     """Render batch recognition UI."""
@@ -104,12 +117,26 @@ def recognition_batch_tab():
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        smoothing = st.number_input("Сглаживание", min_value=1e-6, max_value=0.1, value=1e-3, step=1e-3)
+        smoothing = st.number_input("Сглаживание", min_value=1e-6, max_value=0.1, value=0.001, step=0.001)
     with col2:
         error_target = st.number_input("Порог ошибки P(e)_zad", min_value=0.001, max_value=0.5, value=0.05, step=0.01)
     with col3:
         noise_factor = st.number_input("Шум (factor)", min_value=0.0, max_value=0.5, value=0.0, step=0.01)
         noise_seed = st.number_input("Seed", min_value=0, max_value=10_000, value=123, step=1)
+
+    col4, col5 = st.columns(2)
+    with col4:
+        max_features = st.number_input("Топ-K признаков (0 = все)", min_value=0, max_value=50, value=0, step=1)
+        max_features_val = None if max_features == 0 else max_features
+    with col5:
+        min_info = st.number_input("Мин. информативность", min_value=0.0, max_value=1.0, value=0.0, step=0.001)
+
+    profile = st.selectbox(
+        "Набор признаков",
+        options=[("full", "Полный"), ("compact", "Компактный"), ("baseline", "Базовый (стабильный)")],
+        format_func=lambda x: x[1],
+        index=0,
+    )[0]
 
     if st.button("🔍 Обучить и предсказать", type="primary"):
         segments_input: List[TextSegment] = []
@@ -156,6 +183,9 @@ def recognition_batch_tab():
                 if noise_factor > 0
                 else None
             ),
+            max_features=max_features_val,
+            min_informativeness=min_info,
+            feature_profile=profile,
         )
 
         try:
@@ -174,6 +204,8 @@ def recognition_batch_tab():
                 smoothing=req.smoothing,
                 noise=noise_cfg,
                 error_target=req.error_target,
+                max_features=req.max_features,
+                min_informativeness=req.min_informativeness,
             )
         except Exception as exc:  # noqa: BLE001
             st.error(f"Ошибка расчёта: {exc}")
@@ -195,6 +227,25 @@ def recognition_batch_tab():
             )
         st.dataframe(pl.DataFrame(feat_rows), use_container_width=True)
 
+        # Charts: informativeness and errors
+        if feat_rows:
+            feat_df = pl.DataFrame(feat_rows)
+            fig_info = px.bar(
+                feat_df.to_pandas(),
+                x="name",
+                y="informativeness",
+                title="Информативность признаков",
+            )
+            st.plotly_chart(fig_info, use_container_width=True)
+
+            fig_err = px.bar(
+                feat_df.to_pandas(),
+                x="name",
+                y="error",
+                title="Ошибки P(e) по признакам",
+            )
+            st.plotly_chart(fig_err, use_container_width=True)
+
         _render_tables(_tables_to_dict(result))
         _render_predictions([p.__dict__ for p in result.predictions])
 
@@ -214,6 +265,8 @@ def recognition_batch_tab():
                 f"Итог: рассчитаны постериоры по {len(result.predictions)} сегментам, средняя уверенность {avg_conf:.3f}. "
                 "Точные метки не заданы, точность не вычислена."
             )
+
+        st.caption(f"Использовано признаков: {len(result.used_features)} ({', '.join(result.used_features)})")
 
 
 def _tables_to_dict(result):

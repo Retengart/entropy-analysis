@@ -284,6 +284,84 @@ def bin_end_punct(text: str) -> str:
     return "other_end"
 
 
+VOWELS_RU = set("аеёиоуыэюя")
+
+
+def _count_syllables(word: str) -> int:
+    return sum(ch in VOWELS_RU for ch in word.lower())
+
+
+def bin_syllables_per_line(text: str) -> str:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return "empty"
+    syllables = []
+    for ln in lines:
+        words = WORD_RE.findall(ln.lower())
+        if not words:
+            continue
+        syllables.append(sum(_count_syllables(w) for w in words))
+    if not syllables:
+        return "empty"
+    avg = sum(syllables) / len(syllables)
+    if avg < 8:
+        return "low_syll_per_line"
+    if avg < 12:
+        return "mid_syll_per_line"
+    if avg < 16:
+        return "high_syll_per_line"
+    return "very_high_syll_per_line"
+
+
+def bin_line_length_std(text: str) -> str:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return "empty"
+    lens = [len(ln) for ln in lines]
+    if len(lens) == 1:
+        std = 0.0
+    else:
+        m = sum(lens) / len(lens)
+        std = (sum((x - m) ** 2 for x in lens) / len(lens)) ** 0.5
+    if std < 5:
+        return "low_line_std"
+    if std < 12:
+        return "mid_line_std"
+    if std < 20:
+        return "high_line_std"
+    return "very_high_line_std"
+
+
+def bin_rhyme_repetition(text: str) -> str:
+    """
+    Approximate rhyme repetition: most frequent 3-letter suffix of line endings.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return "empty"
+    suffixes: Dict[str, int] = {}
+    for ln in lines:
+        words = WORD_RE.findall(ln.lower())
+        if not words:
+            continue
+        last = words[-1]
+        suff = last[-3:] if len(last) >= 3 else last
+        suffixes[suff] = suffixes.get(suff, 0) + 1
+    if not suffixes:
+        return "empty"
+    top = max(suffixes.values())
+    ratio = top / max(len(lines), 1)
+    if ratio < 0.15:
+        return "very_low_rhyme_rep"
+    if ratio < 0.3:
+        return "low_rhyme_rep"
+    if ratio < 0.5:
+        return "mid_rhyme_rep"
+    if ratio < 0.7:
+        return "high_rhyme_rep"
+    return "very_high_rhyme_rep"
+
+
 BUILTIN_FEATURES: List[DiscreteFeature] = [
     DiscreteFeature(
         name="avg_word_len",
@@ -350,7 +428,57 @@ BUILTIN_FEATURES: List[DiscreteFeature] = [
         values=["empty", "question_end", "exclam_end", "semicolon_end", "comma_end", "dot_end", "other_end"],
         extractor=bin_end_punct,
     ),
+    DiscreteFeature(
+        name="syllables_per_line",
+        values=[
+            "empty",
+            "low_syll_per_line",
+            "mid_syll_per_line",
+            "high_syll_per_line",
+            "very_high_syll_per_line",
+        ],
+        extractor=bin_syllables_per_line,
+    ),
+    DiscreteFeature(
+        name="line_length_std",
+        values=["empty", "low_line_std", "mid_line_std", "high_line_std", "very_high_line_std"],
+        extractor=bin_line_length_std,
+    ),
+    DiscreteFeature(
+        name="rhyme_repetition",
+        values=[
+            "empty",
+            "very_low_rhyme_rep",
+            "low_rhyme_rep",
+            "mid_rhyme_rep",
+            "high_rhyme_rep",
+            "very_high_rhyme_rep",
+        ],
+        extractor=bin_rhyme_repetition,
+    ),
 ]
+
+# Profiles of feature names
+BASELINE_FEATURE_NAMES = {
+    "avg_word_len",
+    "avg_line_len",
+    "punct_ratio",
+    "token_count",
+    "long_word_share",
+    "stopword_ratio",
+}
+
+COMPACT_FEATURE_NAMES = {
+    "avg_word_len",
+    "avg_line_len",
+    "punct_ratio",
+    "token_count",
+    "long_word_share",
+    "stopword_ratio",
+    "end_punct",
+    "line_count",
+    "unique_ratio",
+}
 
 
 # ---------- Data structures ----------
@@ -385,6 +513,7 @@ class RecognitionBatchResult:
     tables: TrainedTables
     recognition: RecognitionRun
     predictions: List[SegmentPrediction]
+    used_features: List[str]
 
 
 # ---------- Core helpers ----------
@@ -461,7 +590,9 @@ def _train_tables(
 
 
 def _predict_segments(
-    tables: TrainedTables,
+    priors: np.ndarray,
+    class_labels: Sequence[str],
+    feature_specs: Sequence[FeatureSpec],
     features: Sequence[DiscreteFeature],
     segments: Sequence[Segment],
 ) -> List[SegmentPrediction]:
@@ -472,8 +603,8 @@ def _predict_segments(
 
     for seg in segments:
         vals = _compute_feature_values(seg.text, features)
-        log_probs = np.log(np.clip(tables.priors, 1e-12, None))
-        for feat_spec in tables.features:
+        log_probs = np.log(np.clip(priors, 1e-12, None))
+        for feat_spec in feature_specs:
             val = vals[feat_spec.name]
             try:
                 v_idx = feature_value_lists[feat_spec.name].index(val)
@@ -483,7 +614,7 @@ def _predict_segments(
             cond_row = feat_spec.conditional
             if v_idx is None:
                 # unseen value: assume uniform across classes to avoid arbitrary penalty
-                log_probs += math.log(1.0 / len(tables.class_labels))
+                log_probs += math.log(1.0 / len(priors))
             else:
                 log_probs += np.log(np.clip(cond_row[:, v_idx], 1e-12, None))
 
@@ -492,13 +623,13 @@ def _predict_segments(
         stabilized = np.exp(log_probs - max_log)
         posterior = stabilized / stabilized.sum()
         pred_idx = int(np.argmax(posterior))
-        pred_label = tables.class_labels[pred_idx]
+        pred_label = class_labels[pred_idx]
         preds.append(
             SegmentPrediction(
                 name=seg.name,
                 true_label=seg.label,
                 predicted_label=pred_label,
-                posteriors={lbl: float(posterior[i]) for i, lbl in enumerate(tables.class_labels)},
+                posteriors={lbl: float(posterior[i]) for i, lbl in enumerate(class_labels)},
                 feature_values=vals,
             )
         )
@@ -511,22 +642,66 @@ def train_and_run_batch(
     noise: NoiseConfig | None = None,
     error_target: float = 0.05,
     features: Sequence[DiscreteFeature] | None = None,
+    max_features: int | None = None,
+    min_informativeness: float = 0.0,
+    feature_profile: str = "full",
 ) -> RecognitionBatchResult:
     """
     Train probability tables from labeled segments and run recognition analysis + predictions.
     """
-    feats = list(features) if features else BUILTIN_FEATURES
+    if features:
+        feats = list(features)
+    else:
+        if feature_profile == "baseline":
+            feats = [f for f in BUILTIN_FEATURES if f.name in BASELINE_FEATURE_NAMES]
+        elif feature_profile == "compact":
+            feats = [f for f in BUILTIN_FEATURES if f.name in COMPACT_FEATURE_NAMES]
+        else:
+            feats = BUILTIN_FEATURES
     tables = _train_tables(segments, feats, smoothing=smoothing)
-    rec_input = RecognitionInput(
+    full_input = RecognitionInput(
         priors=tables.priors,
         features=tables.features,
         error_target=error_target,
         noise=noise,
     )
+    full_analysis = RecognitionEngine.analyze(full_input)
+
+    # Select features by informativeness / threshold
+    selected = list(full_analysis.clean.features)
+    if min_informativeness > 0:
+        selected = [f for f in selected if f.informativeness >= min_informativeness]
+    if max_features is not None:
+        selected = sorted(selected, key=lambda f: f.informativeness, reverse=True)[:max_features]
+    if not selected:
+        # fallback: take the single most informative
+        selected = [max(full_analysis.clean.features, key=lambda f: f.informativeness)]
+
+    selected_names = {f.name for f in selected}
+    selected_specs = [feat for feat in tables.features if feat.name in selected_names]
+
+    rec_input = RecognitionInput(
+        priors=tables.priors,
+        features=selected_specs,
+        error_target=error_target,
+        noise=noise,
+    )
     rec_analysis = RecognitionEngine.analyze(rec_input)
-    preds = _predict_segments(tables, feats, segments)
+
+    # Map DiscreteFeature list to selected only
+    feat_lookup = {f.name: f for f in feats}
+    selected_discrete = [feat_lookup[name] for name in selected_names if name in feat_lookup]
+
+    preds = _predict_segments(
+        priors=tables.priors,
+        class_labels=tables.class_labels,
+        feature_specs=selected_specs,
+        features=selected_discrete,
+        segments=segments,
+    )
     return RecognitionBatchResult(
         tables=tables,
         recognition=rec_analysis.clean,
         predictions=preds,
+        used_features=[f.name for f in rec_analysis.clean.features],
     )
