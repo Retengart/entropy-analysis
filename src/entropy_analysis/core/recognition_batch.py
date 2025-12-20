@@ -458,6 +458,22 @@ BUILTIN_FEATURES: List[DiscreteFeature] = [
     ),
 ]
 
+# Try to load poetry-specific features
+try:
+    from .poetry_features import POETRY_FEATURE_DEFINITIONS
+    
+    for feat_def in POETRY_FEATURE_DEFINITIONS:
+        BUILTIN_FEATURES.append(
+            DiscreteFeature(
+                name=feat_def["name"],
+                values=feat_def["values"],
+                extractor=feat_def["extractor"],
+            )
+        )
+except ImportError:
+    # Poetry features not available
+    pass
+
 # Profiles of feature names
 BASELINE_FEATURE_NAMES = {
     "avg_word_len",
@@ -478,6 +494,41 @@ COMPACT_FEATURE_NAMES = {
     "end_punct",
     "line_count",
     "unique_ratio",
+}
+
+POETRY_ESSENTIAL_NAMES = {
+    # Только проверенные эффективные признаки
+    "adjective_density",
+    "enjambment_rate",
+    "exclamation_ratio",
+    "meter_pattern",
+    "rhyme_scheme",
+    "syllables_per_line",
+    "avg_line_len",
+    # Лексиконы добавляются автоматически через use_author_lexicons
+}
+
+POETRY_FULL_NAMES = {
+    # All poetry features + structural baseline
+    "meter_pattern",
+    "meter_regularity",
+    "rhyme_scheme",
+    "rhyme_quality",
+    "enjambment_rate",
+    "adjective_density",
+    "pushkin_lexicon",
+    "lermontov_lexicon",
+    "consonant_repetition",
+    "voiced_consonant_ratio",
+    "exclamation_ratio",
+    "question_ratio",
+    "avg_line_len",
+    "syllables_per_line",
+    "line_length_std",
+    "rhyme_repetition",
+    "avg_word_len",
+    "punct_ratio",
+    "stopword_ratio",
 }
 
 
@@ -529,6 +580,7 @@ def _train_tables(
     segments: Sequence[Segment],
     features: Sequence[DiscreteFeature],
     smoothing: float,
+    balance_classes: bool = True,
 ) -> TrainedTables:
     labeled = [s for s in segments if s.label]
     if not labeled:
@@ -559,7 +611,16 @@ def _train_tables(
 
     if priors.sum() <= 0:
         raise ValueError("Не удалось посчитать априорные вероятности.")
-    priors /= priors.sum()
+    
+    # УЛУЧШЕНИЕ: балансировка классов
+    # При несбалансированных данных используем равномерные приоры
+    if balance_classes:
+        print(f"\n⚖️  Балансировка классов:")
+        print(f"   Исходные приоры: {dict(zip(class_labels, priors))}")
+        priors = np.ones(m) / m  # равномерное распределение
+        print(f"   Сбалансированные: {dict(zip(class_labels, priors))}")
+    else:
+        priors /= priors.sum()
 
     feature_specs: List[FeatureSpec] = []
     for feat in features:
@@ -645,9 +706,14 @@ def train_and_run_batch(
     max_features: int | None = None,
     min_informativeness: float = 0.0,
     feature_profile: str = "full",
+    use_author_lexicons: bool = True,
 ) -> RecognitionBatchResult:
     """
     Train probability tables from labeled segments and run recognition analysis + predictions.
+    
+    Args:
+        use_author_lexicons: если True, автоматически извлекает характерные слова
+                             для каждого автора через TF-IDF и добавляет как признаки
     """
     if features:
         feats = list(features)
@@ -656,9 +722,39 @@ def train_and_run_batch(
             feats = [f for f in BUILTIN_FEATURES if f.name in BASELINE_FEATURE_NAMES]
         elif feature_profile == "compact":
             feats = [f for f in BUILTIN_FEATURES if f.name in COMPACT_FEATURE_NAMES]
+        elif feature_profile == "poetry_essential":
+            feats = [f for f in BUILTIN_FEATURES if f.name in POETRY_ESSENTIAL_NAMES]
+        elif feature_profile == "poetry_full":
+            feats = [f for f in BUILTIN_FEATURES if f.name in POETRY_FULL_NAMES]
         else:
             feats = BUILTIN_FEATURES
-    tables = _train_tables(segments, feats, smoothing=smoothing)
+    
+    # Автоматическое построение лексиконов для каждого автора (если включено)
+    if use_author_lexicons and "poetry" in feature_profile:
+        try:
+            from .poetry_features import build_author_lexicons, bin_author_lexicon_density
+            
+            # Строим TF-IDF лексиконы
+            build_author_lexicons(segments, top_n=50)
+            
+            # Добавляем динамические признаки для каждого автора
+            authors = sorted({s.label for s in segments if s.label})
+            for author in authors:
+                # ИСПРАВЛЕНИЕ: используем default argument для правильного замыкания
+                def make_extractor(author_name=author):
+                    return lambda text: bin_author_lexicon_density(text, author_name)
+                
+                feats.append(
+                    DiscreteFeature(
+                        name=f"lexicon_{author}",
+                        values=["empty", "unknown_lexicon", "very_low", "low", "mid", "high", "very_high"],
+                        extractor=make_extractor(),
+                    )
+                )
+        except ImportError:
+            pass  # poetry_features не доступен или sklearn отсутствует
+    
+    tables = _train_tables(segments, feats, smoothing=smoothing, balance_classes=True)
     full_input = RecognitionInput(
         priors=tables.priors,
         features=tables.features,
@@ -669,13 +765,22 @@ def train_and_run_batch(
 
     # Select features by informativeness / threshold
     selected = list(full_analysis.clean.features)
+    
+    # УЛУЧШЕНИЕ: автоматически отбрасываем признаки с нулевой информативностью
+    # (они не помогают различать классы)
+    selected = [f for f in selected if f.informativeness > 1e-6]
+    
     if min_informativeness > 0:
         selected = [f for f in selected if f.informativeness >= min_informativeness]
     if max_features is not None:
         selected = sorted(selected, key=lambda f: f.informativeness, reverse=True)[:max_features]
     if not selected:
-        # fallback: take the single most informative
-        selected = [max(full_analysis.clean.features, key=lambda f: f.informativeness)]
+        # fallback: take top-3 most informative (даже если низкие)
+        selected = sorted(
+            full_analysis.clean.features, 
+            key=lambda f: f.informativeness, 
+            reverse=True
+        )[:min(3, len(full_analysis.clean.features))]
 
     selected_names = {f.name for f in selected}
     selected_specs = [feat for feat in tables.features if feat.name in selected_names]

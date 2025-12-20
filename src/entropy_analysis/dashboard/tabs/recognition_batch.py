@@ -133,10 +133,22 @@ def recognition_batch_tab():
 
     profile = st.selectbox(
         "Набор признаков",
-        options=[("full", "Полный"), ("compact", "Компактный"), ("baseline", "Базовый (стабильный)")],
+        options=[
+            ("full", "Полный (все признаки)"),
+            ("compact", "Компактный"),
+            ("baseline", "Базовый (стабильный)"),
+            ("poetry_essential", "🎭 Поэзия (оптимально)"),
+            ("poetry_full", "🎭 Поэзия (максимум)"),
+        ],
         format_func=lambda x: x[1],
         index=0,
     )[0]
+    
+    use_lexicons = st.checkbox(
+        "📚 Автоматические лексиконы авторов (TF-IDF)",
+        value=True,
+        help="Извлекает характерные слова для каждого автора. Работает с любыми авторами!"
+    )
 
     if st.button("🔍 Обучить и предсказать", type="primary"):
         segments_input: List[TextSegment] = []
@@ -186,6 +198,7 @@ def recognition_batch_tab():
             max_features=max_features_val,
             min_informativeness=min_info,
             feature_profile=profile,
+            use_author_lexicons=use_lexicons,
         )
 
         try:
@@ -207,6 +220,7 @@ def recognition_batch_tab():
                 max_features=req.max_features,
                 min_informativeness=req.min_informativeness,
                 feature_profile=req.feature_profile,
+                use_author_lexicons=req.use_author_lexicons,
             )
         except Exception as exc:  # noqa: BLE001
             st.error(f"Ошибка расчёта: {exc}")

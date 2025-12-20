@@ -380,7 +380,10 @@ class RecognitionBatchRequest(BaseModel):
         0.0, ge=0.0, description="Drop features with informativeness below this threshold"
     )
     feature_profile: str = Field(
-        "full", description="Feature set: 'baseline', 'compact', or 'full'"
+        "full", description="Feature set: 'baseline', 'compact', 'poetry_essential', 'poetry_full', or 'full'"
+    )
+    use_author_lexicons: bool = Field(
+        True, description="Автоматически извлекать характерные слова авторов (TF-IDF)"
     )
 
 
