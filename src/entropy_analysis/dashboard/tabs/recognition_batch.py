@@ -230,8 +230,12 @@ def recognition_batch_tab():
 
         # Recognition run summary
         st.subheader("Метрики признаков")
+        
+        # Access clean run for features
+        clean_run = result.recognition.clean
+        
         feat_rows = []
-        for f in result.recognition.features:
+        for f in clean_run.features:
             feat_rows.append(
                 {
                     "name": f.name,
@@ -242,9 +246,60 @@ def recognition_batch_tab():
             )
         st.dataframe(pl.DataFrame(feat_rows), use_container_width=True)
 
+        # Show noise effect if available
+        if noise_factor > 0:
+            st.divider()
+            st.markdown(f"### 📉 Влияние помех (factor={noise_factor})")
+            
+            if result.recognition.delta_rel is not None:
+                d_abs = result.recognition.delta_abs
+                d_rel = result.recognition.delta_rel
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Ошибка без шума P(e)", f"{result.recognition.clean.min_error:.4f}")
+                c2.metric("Ошибка с шумом P*(e)", f"{result.recognition.noisy.min_error:.4f}", delta=f"{d_abs:+.4f}", delta_color="inverse")
+                c3.metric("Относ. прирост δP", f"{d_rel:.1%}", delta_color="inverse")
+
+                # Show noisy errors comparison
+                if result.recognition.noisy:
+                    noisy_map = {f.name: f.error for f in result.recognition.noisy.features}
+                    comparison_rows = []
+                    for f in clean_run.features:
+                        noisy_err = noisy_map.get(f.name, 0.0)
+                        diff = noisy_err - f.error
+                        # Show only features where error changed significantly
+                        if abs(diff) > 1e-5:
+                            comparison_rows.append({
+                                "Признак": f.name,
+                                "P(e) чистый": f.error,
+                                "P*(e) шумный": noisy_err,
+                                "Разница": diff
+                            })
+                    
+                    if comparison_rows:
+                        st.caption("Признаки, наиболее чувствительные к шуму:")
+                        # Sort by biggest absolute change
+                        comparison_rows.sort(key=lambda x: abs(x["Разница"]), reverse=True)
+                        st.dataframe(
+                            pl.DataFrame(comparison_rows),
+                            use_container_width=True,
+                            column_config={
+                                "P(e) чистый": st.column_config.NumberColumn(format="%.4f"),
+                                "P*(e) шумный": st.column_config.NumberColumn(format="%.4f"),
+                                "Разница": st.column_config.NumberColumn(format="%+.4f"),
+                            }
+                        )
+                    else:
+                        st.info("Шум не оказал существенного влияния на ошибки отдельных признаков.")
+            else:
+                st.warning("Результаты с шумом не были вычислены (возможно, ошибка на сервере).")
+        
+        st.divider()
+
         # Charts: informativeness and errors
         if feat_rows:
             feat_df = pl.DataFrame(feat_rows)
+            # ... existing charts ...
             fig_info = px.bar(
                 feat_df.to_pandas(),
                 x="name",
@@ -257,7 +312,7 @@ def recognition_batch_tab():
                 feat_df.to_pandas(),
                 x="name",
                 y="error",
-                title="Ошибки P(e) по признакам",
+                title="Ошибки P(e) по признакам (без шума)",
             )
             st.plotly_chart(fig_err, use_container_width=True)
 
@@ -267,13 +322,28 @@ def recognition_batch_tab():
         # Conclusion / summary
         true_labels = [p.true_label for p in result.predictions if p.true_label]
         pred_labels = [p.predicted_label for p in result.predictions]
+        
+        summary_md = []
+        
         if true_labels and len(true_labels) == len(result.predictions):
             acc = sum(t == p for t, p in zip(true_labels, pred_labels)) / len(true_labels)
             avg_conf = sum(p.posteriors[p.predicted_label] for p in result.predictions) / len(result.predictions)
-            st.info(
-                f"Итог: точность {acc:.3f}, средняя уверенность {avg_conf:.3f}. "
-                f"{'Модель склоняется к одному классу' if len(set(pred_labels))==1 else 'Предсказания распределены по классам'}."
-            )
+            summary_md.append(f"**Точность (без шума):** `{acc:.3%}`")
+            summary_md.append(f"**Средняя уверенность:** `{avg_conf:.3f}`")
+            
+            # Если есть шумные предсказания, считаем точность для них
+            if result.noisy_predictions:
+                noisy_pred_labels = [p.predicted_label for p in result.noisy_predictions]
+                acc_noisy = sum(t == p for t, p in zip(true_labels, noisy_pred_labels)) / len(true_labels)
+                summary_md.append(f"**Точность (с шумом):** `{acc_noisy:.3%}`")
+                summary_md.append(f"**Падение точности:** `{(acc - acc_noisy):.3%}`")
+            
+            if len(set(pred_labels)) == 1:
+                summary_md.append("⚠️ Модель склоняется к одному классу.")
+            else:
+                summary_md.append("✅ Предсказания распределены по классам.")
+                
+            st.info("\n\n".join(summary_md))
         else:
             avg_conf = sum(p.posteriors[p.predicted_label] for p in result.predictions) / len(result.predictions)
             st.info(
