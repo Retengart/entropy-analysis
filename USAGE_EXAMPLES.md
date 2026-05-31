@@ -202,6 +202,42 @@ cargo run --release -- multi-poem pushkin_complete.txt \
 - Подробная таблица анализа
 - Сводная таблица в CSV
 
+### Анализ корреляции между системами перевода
+
+```bash
+cargo run --release -- multi-poem translations.txt \
+    --delimiter "***" \
+    --correlation-lang translation_correlation.svg
+```
+
+**Результат:**
+- График корреляции между разными системами перевода (Яндекс, Google, DeepL и др.)
+- Показывает, насколько согласованы энтропийные характеристики текстов, переведенных разными системами
+
+### Комплексный анализ с графиками корреляции
+
+```bash
+cargo run --release -- multi-poem poems_with_translations.txt \
+    --delimiter "***" \
+    --correlation \
+    --correlation-plot entropy_correlation.svg \
+    --correlation-lang translation_correlation.svg \
+    --normal-dist-plot entropy_distribution.svg \
+    --analysis-table detailed_analysis.csv \
+    --summary-csv summary.csv \
+    --min-entropy 2.0 \
+    --max-entropy 5.0 \
+    --label-top-entropy 5
+```
+
+**Результат:**
+- Стандартный график корреляции H vs N
+- График корреляции между системами перевода
+- График нормального распределения энтропии
+- Подробная таблица анализа всех текстов
+- Фильтрация текстов с энтропией от 2.0 до 5.0 бит
+- Подпись топ-5 текстов по энтропии
+
 ### Анализ конкретного периода творчества
 
 ```bash
